@@ -11,6 +11,7 @@
  */
 
 import Database from 'better-sqlite3';
+import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -60,32 +61,21 @@ for (const { name } of tableRows) {
 db.close();
 console.log(`\nTotal: ${Object.keys(tables).length} tables, ${totalRows} rows\n`);
 
-// ─── Step 2: Authenticate with remote ────────────────────────────────────────
+// ─── Step 2: Compute auth token directly ────────────────────────────────────
+// The auth token is HMAC-SHA256(password, 'schema-planner-session') — same as server/auth.ts
+const token = crypto.createHmac('sha256', password).update('schema-planner-session').digest('hex');
+const sessionCookie = `splan_session=${token}`;
 
+// Verify the token works by hitting the auth check endpoint
 console.log(`Authenticating with ${baseUrl}...`);
-
-const loginRes = await fetch(`${baseUrl}/auth/login`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ password }),
-  redirect: 'manual', // Don't follow the 302 — we need the Set-Cookie header
+const checkRes = await fetch(`${baseUrl}/auth/check`, {
+  headers: { 'Cookie': sessionCookie },
 });
-
-// Extract the session cookie from the response
-const setCookieHeader = loginRes.headers.get('set-cookie') || '';
-const cookieMatch = setCookieHeader.match(/splan_session=([^;]+)/);
-
-if (!cookieMatch) {
-  console.error('Authentication failed. Could not get session cookie.');
-  console.error(`Response status: ${loginRes.status}`);
-  if (loginRes.status === 200) {
-    // 200 means the login page was returned (wrong password shows the form again)
-    console.error('The password may be incorrect.');
-  }
+const checkData = await checkRes.json();
+if (!checkData.authenticated) {
+  console.error('Authentication failed. The password may be incorrect.');
   process.exit(1);
 }
-
-const sessionCookie = `splan_session=${cookieMatch[1]}`;
 console.log('Authenticated successfully.\n');
 
 // ─── Step 3: POST the data to /api/db-import ────────────────────────────────

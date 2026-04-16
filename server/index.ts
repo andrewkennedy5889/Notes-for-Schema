@@ -1406,11 +1406,11 @@ app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: 
 
   const imported: Record<string, number> = {};
 
-  const importAll = db.transaction(() => {
-    // Disable foreign keys for the duration of the import
-    db.pragma('foreign_keys = OFF');
+  // PRAGMA foreign_keys cannot be changed inside a transaction — set it before
+  db.pragma('foreign_keys = OFF');
 
-    try {
+  try {
+    const importAll = db.transaction(() => {
       for (const [tableName, rows] of Object.entries(tables)) {
         if (SKIP_TABLES.has(tableName)) continue;
         if (!Array.isArray(rows)) continue;
@@ -1444,13 +1444,12 @@ app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: 
         }
         imported[tableName] = count;
       }
-    } finally {
-      // Re-enable foreign keys
-      db.pragma('foreign_keys = ON');
-    }
-  });
+    });
 
-  importAll();
+    importAll();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 
   return void res.json({ success: true, imported });
 });
