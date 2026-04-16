@@ -387,6 +387,195 @@ app.delete('/api/column-defs/:id', (req: Request, res: Response) => {
   return void res.json({ success: true });
 });
 
+// ─── Display Templates CRUD ─────────────────────────────────────────────────
+
+app.get('/api/display-templates', (_req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db.prepare('SELECT * FROM _splan_display_templates ORDER BY template_name').all() as Record<string, unknown>[];
+  return void res.json(rows.map(parseRow));
+});
+
+app.post('/api/display-templates', (req: Request, res: Response) => {
+  const { templateName, displayMode, fontSize, fontBold, fontUnderline, fontColor, alignment, wrap, lines, colorMapping } = req.body;
+  if (!templateName?.trim()) return void res.status(400).json({ error: 'templateName is required' });
+  const db = getDb();
+  try {
+    const info = db.prepare(
+      `INSERT INTO _splan_display_templates (template_name, display_mode, font_size, font_bold, font_underline, font_color, alignment, wrap, lines, color_mapping)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      templateName.trim(),
+      displayMode || 'text',
+      fontSize ?? null,
+      fontBold ? 1 : 0,
+      fontUnderline ? 1 : 0,
+      fontColor || null,
+      alignment || 'left',
+      wrap ? 1 : 0,
+      lines ?? 1,
+      JSON.stringify(colorMapping || {})
+    );
+    const created = db.prepare('SELECT * FROM _splan_display_templates WHERE id = ?').get(info.lastInsertRowid) as Record<string, unknown>;
+    return void res.status(201).json(parseRow(created));
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.includes('UNIQUE')) return void res.status(409).json({ error: `Template "${templateName}" already exists` });
+    throw err;
+  }
+});
+
+app.put('/api/display-templates/:id', (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM _splan_display_templates WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  if (!existing) return void res.status(404).json({ error: 'Template not found' });
+
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  const allowed: Record<string, (v: unknown) => unknown> = {
+    template_name: (v) => v,
+    display_mode: (v) => v,
+    font_size: (v) => v,
+    font_bold: (v) => v ? 1 : 0,
+    font_underline: (v) => v ? 1 : 0,
+    font_color: (v) => v || null,
+    alignment: (v) => v,
+    wrap: (v) => v ? 1 : 0,
+    lines: (v) => v,
+    color_mapping: (v) => JSON.stringify(v || {}),
+  };
+
+  for (const [camelKey, val] of Object.entries(req.body)) {
+    const snakeKey = camelKey.replace(/([A-Z])/g, (c) => `_${c.toLowerCase()}`);
+    if (snakeKey in allowed && val !== undefined) {
+      fields.push(`${snakeKey} = ?`);
+      values.push(allowed[snakeKey](val));
+    }
+  }
+  if (fields.length === 0) return void res.status(400).json({ error: 'No valid fields to update' });
+
+  fields.push("updated_at = datetime('now')");
+  values.push(id);
+  db.prepare(`UPDATE _splan_display_templates SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  const updated = db.prepare('SELECT * FROM _splan_display_templates WHERE id = ?').get(id) as Record<string, unknown>;
+  return void res.json(parseRow(updated));
+});
+
+app.delete('/api/display-templates/:id', (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM _splan_display_templates WHERE id = ?').get(id);
+  if (!existing) return void res.status(404).json({ error: 'Template not found' });
+  db.prepare('DELETE FROM _splan_display_templates WHERE id = ?').run(id);
+  return void res.json({ success: true });
+});
+
+// ─── Column Template Assignments ────────────────────────────────────────────
+
+app.get('/api/column-template-assignments', (_req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db.prepare('SELECT * FROM _splan_column_template_assignments').all() as Record<string, unknown>[];
+  return void res.json(rows.map(parseRow));
+});
+
+app.post('/api/column-template-assignments', (req: Request, res: Response) => {
+  const { entityType, columnKey, templateId } = req.body;
+  if (!entityType || !columnKey || !templateId) return void res.status(400).json({ error: 'entityType, columnKey, and templateId are required' });
+  const db = getDb();
+  // Upsert: replace if exists
+  db.prepare(
+    `INSERT INTO _splan_column_template_assignments (entity_type, column_key, template_id)
+     VALUES (?, ?, ?)
+     ON CONFLICT(entity_type, column_key) DO UPDATE SET template_id = excluded.template_id`
+  ).run(entityType, columnKey, templateId);
+  const row = db.prepare('SELECT * FROM _splan_column_template_assignments WHERE entity_type = ? AND column_key = ?').get(entityType, columnKey) as Record<string, unknown>;
+  return void res.json(parseRow(row));
+});
+
+app.delete('/api/column-template-assignments/:entityType/:columnKey', (req: Request, res: Response) => {
+  const { entityType, columnKey } = req.params;
+  const db = getDb();
+  db.prepare('DELETE FROM _splan_column_template_assignments WHERE entity_type = ? AND column_key = ?').run(entityType, columnKey);
+  return void res.json({ success: true });
+});
+
+// ─── Display Templates Seed ─────────────────────────────────────────────────
+
+app.post('/api/display-templates/seed', (req: Request, res: Response) => {
+  const db = getDb();
+  // Only seed if no templates exist yet
+  const count = (db.prepare('SELECT COUNT(*) as cnt FROM _splan_display_templates').get() as { cnt: number }).cnt;
+  if (count > 0) return void res.json({ seeded: false, message: 'Templates already exist' });
+
+  // Client sends column assignments: Array<{ entityType, columnKey, columnType }>
+  const columnMappings = (req.body.columns || []) as Array<{ entityType: string; columnKey: string; columnType: string }>;
+
+  // Starter templates based on column type groups
+  const starters: Array<{
+    name: string; mode: string; fontSize: number | null;
+    fontColor: string | null; colorMapping: Record<string, string>;
+  }> = [
+    { name: 'Colored Pill', mode: 'pill', fontSize: 12, fontColor: null, colorMapping: {} },
+    { name: 'Outline Badge', mode: 'chip', fontSize: 10, fontColor: null, colorMapping: {} },
+    { name: 'Plain Text', mode: 'text', fontSize: 12, fontColor: null, colorMapping: {} },
+    { name: 'Gray Tag', mode: 'tag', fontSize: 10, fontColor: '#9999b3', colorMapping: {} },
+    { name: 'Muted Timestamp', mode: 'text', fontSize: 10, fontColor: '#9999b3', colorMapping: {} },
+    { name: 'FK Link', mode: 'text', fontSize: 12, fontColor: '#5bc0de', colorMapping: {} },
+    { name: 'Boolean Toggle', mode: 'pill', fontSize: 12, fontColor: null, colorMapping: { 'true': '#4ecb71', 'false': '#e05555' } },
+    { name: 'Count Badge', mode: 'text', fontSize: 10, fontColor: '#5bc0de', colorMapping: {} },
+  ];
+
+  const insertTpl = db.prepare(
+    `INSERT INTO _splan_display_templates (template_name, display_mode, font_size, font_color, color_mapping) VALUES (?, ?, ?, ?, ?)`
+  );
+  const insertAssign = db.prepare(
+    `INSERT OR IGNORE INTO _splan_column_template_assignments (entity_type, column_key, template_id) VALUES (?, ?, ?)`
+  );
+
+  // Map column types to template names
+  const typeToTemplate: Record<string, string> = {
+    'enum': 'Colored Pill',
+    'boolean': 'Boolean Toggle',
+    'multi-fk': 'Outline Badge',
+    'text': 'Plain Text',
+    'textarea': 'Plain Text',
+    'int': 'Plain Text',
+    'tags': 'Gray Tag',
+    'module-tags': 'Gray Tag',
+    'readonly': 'Muted Timestamp',
+    'fk': 'FK Link',
+    'image-carousel': 'Count Badge',
+    'test-count': 'Count Badge',
+    'note-fullscreen': 'Count Badge',
+    'formula': 'Plain Text',
+    'checklist': 'Plain Text',
+    'platforms': 'Outline Badge',
+    'ref-features': 'Count Badge',
+    'ref-projects': 'Count Badge',
+  };
+
+  const tplIds: Record<string, number> = {};
+  let assignCount = 0;
+
+  const insertAll = db.transaction(() => {
+    for (const s of starters) {
+      const info = insertTpl.run(s.name, s.mode, s.fontSize, s.fontColor, JSON.stringify(s.colorMapping));
+      tplIds[s.name] = Number(info.lastInsertRowid);
+    }
+
+    // Assign each column to its matching template
+    for (const { entityType, columnKey, columnType } of columnMappings) {
+      const tplName = typeToTemplate[columnType];
+      if (tplName && tplIds[tplName]) {
+        insertAssign.run(entityType, columnKey, tplIds[tplName]);
+        assignCount++;
+      }
+    }
+  });
+  insertAll();
+
+  return void res.json({ seeded: true, templates: Object.keys(tplIds).length, assignments: assignCount });
+});
+
 // ─── GET /api/schema-planner/counts ──────────────────────────────────────────
 app.get('/api/schema-planner/counts', (_req: Request, res: Response) => {
   const db = getDb();
@@ -1201,6 +1390,69 @@ app.delete('/api/agents/schedules/:agentId', (req: Request, res: Response) => {
   } else {
     doRemove();
   }
+});
+
+// ─── POST /api/db-import — bulk import all tables ───────────────────────────
+app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: Response) => {
+  const { tables } = req.body as { tables: Record<string, Record<string, unknown>[]> };
+  if (!tables || typeof tables !== 'object') {
+    return void res.status(400).json({ error: 'Request body must contain a "tables" object' });
+  }
+
+  const db = getDb();
+
+  // Tables/views to skip
+  const SKIP_TABLES = new Set(['_splan_all_tests', '_splan_grouping_presets']);
+
+  const imported: Record<string, number> = {};
+
+  const importAll = db.transaction(() => {
+    // Disable foreign keys for the duration of the import
+    db.pragma('foreign_keys = OFF');
+
+    try {
+      for (const [tableName, rows] of Object.entries(tables)) {
+        if (SKIP_TABLES.has(tableName)) continue;
+        if (!Array.isArray(rows)) continue;
+
+        // Verify this table actually exists in the database
+        const tableExists = db.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name = ?"
+        ).get(tableName);
+        if (!tableExists) continue;
+
+        // Clear existing data
+        db.exec(`DELETE FROM ${tableName}`);
+
+        if (rows.length === 0) {
+          imported[tableName] = 0;
+          continue;
+        }
+
+        // Use columns from the first row
+        const cols = Object.keys(rows[0]);
+        const placeholders = cols.map(() => '?').join(', ');
+        const insertStmt = db.prepare(
+          `INSERT INTO ${tableName} (${cols.join(', ')}) VALUES (${placeholders})`
+        );
+
+        let count = 0;
+        for (const row of rows) {
+          const values = cols.map(c => row[c] ?? null);
+          insertStmt.run(...values);
+          count++;
+        }
+        imported[tableName] = count;
+      }
+    } finally {
+      // Re-enable foreign keys
+      db.pragma('foreign_keys = ON');
+    }
+  });
+
+  importAll();
+
+  return void res.json({ success: true, imported });
 });
 
 // ─── Production: serve built frontend ────────────────────────────────────────
