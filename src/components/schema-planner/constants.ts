@@ -1,0 +1,477 @@
+import type { TableConfig } from "./types";
+
+export const TABLE_CONFIGS: Record<string, TableConfig> = {
+  modules: {
+    label: "Modules",
+    apiTable: "_splan_modules",
+    idKey: "moduleId",
+    nameKey: "moduleName",
+    entityType: "module",
+    columns: [
+      { key: "moduleName", label: "Name", type: "text", required: true, tooltip: "Display name of the system module" },
+      { key: "moduleDescription", label: "Description", type: "textarea", hint: "100 words or less", tooltip: "Brief summary of what this module does" },
+      { key: "groupLabel", label: "Group", type: "text", hint: "e.g. Core, Phase 1, Data Entry", tooltip: "Focus area or phase grouping for organization" },
+      { key: "platforms", label: "Platforms", type: "platforms", tooltip: "Which platforms this module runs on (Web, Android, Apple, Other)" },
+      { key: "tags", label: "Tags", type: "module-tags", tooltip: "Tier 1 (max 125, high-impact) and Tier 2 (unlimited) tags for categorization" },
+      { key: "_operatedBy", label: "Operated By", type: "module-rules", tooltip: "The primary user entity — collects/manipulates inputs, determines outputs", hint: "Click to define rules" },
+      { key: "_receivesInputFrom", label: "Receives Input From", type: "module-rules", tooltip: "Entities this module requires inputs from to function", hint: "Click to define rules" },
+      { key: "_deliversOutputTo", label: "Delivers Output To", type: "module-rules", tooltip: "Entities that receive this module's results and deliverables", hint: "Click to define rules" },
+      { key: "moduleLogo", label: "Logo URL", type: "text", hideInGrid: true, tooltip: "URL or path to the module's logo image" },
+      { key: "modulePurpose", label: "Purpose", type: "textarea", tooltip: "Detailed purpose and goals of this module" },
+      { key: "moduleCreator", label: "Creator ID", type: "int", hint: "0 = system", tooltip: "Person record ID of who created this module (0 = system)" },
+      { key: "isSystemCreated", label: "System Created", type: "boolean", tooltip: "Whether this module is built-in vs user-created" },
+      { key: "images", label: "Images", type: "image-carousel", hideInModal: true, tooltip: "Click to view and manage images" },
+      { key: "_testCount", label: "Tests", type: "test-count", hideInModal: true, tooltip: "Click to view and manage test cases" },
+      { key: "_projectRefs", label: "Projects", type: "ref-projects", badge: "calc", badgeTooltip: "Computed from code change dependencies", tooltip: "Projects that reference this module via code change dependencies" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this record was first created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this record was last modified" },
+    ],
+  },
+  features: {
+    label: "Features",
+    apiTable: "_splan_features",
+    idKey: "featureId",
+    nameKey: "featureName",
+    entityType: "feature",
+    columns: [
+      { key: "featureName", label: "Feature Name", type: "text", required: true, tooltip: "Name of the feature or capability" },
+      { key: "modules", label: "Modules", type: "multi-fk", fkTable: "modules", fkId: "moduleId", fkName: "moduleName", tooltip: "Which modules this feature belongs to" },
+      { key: "status", label: "Status", type: "enum", options: ["Idea", "Approved", "Partially Implemented", "Implemented"], tooltip: "Current lifecycle stage of this feature" },
+      { key: "priority", label: "Priority", type: "enum", options: ["Critical", "High", "Medium", "Low", "N/A"], tooltip: "Implementation priority level" },
+      { key: "_sep1", label: "Fields above are recommended before generating a feature record", type: "separator", hideInGrid: true },
+      { key: "description", label: "Description", type: "textarea", hint: "100 words or less", tooltip: "Brief description of what this feature does" },
+      { key: "featureTags", label: "Tags", type: "tags", tooltip: "Freeform tags for categorization and filtering" },
+      { key: "dataTables", label: "Data Tables", type: "multi-fk", fkTable: "data_tables", fkId: "tableId", fkName: "tableName", hideInGrid: true, hideInModal: true, tooltip: "Tables this feature depends on (auto-extracted from notes)" },
+      { key: "dataFields", label: "Data Fields", type: "multi-fk", fkTable: "data_fields", fkId: "fieldId", fkName: "fieldName", hideInGrid: true, hideInModal: true, tooltip: "Fields this feature depends on (auto-extracted from notes)" },
+      { key: "notes", label: "Web App Notes", type: "textarea", hideInGrid: true, tooltip: "Implementation notes for the web app version" },
+      { key: "nativeNotes", label: "Native Notes", type: "textarea", hideInGrid: true, tooltip: "Shared notes for all native platforms" },
+      { key: "androidNotes", label: "Android Notes", type: "textarea", hideInGrid: true, tooltip: "Android-specific implementation notes" },
+      { key: "appleNotes", label: "Apple Notes", type: "textarea", hideInGrid: true, tooltip: "Apple/iOS-specific implementation notes" },
+      { key: "otherNotes", label: "Other Notes", type: "textarea", hideInGrid: true, tooltip: "Notes for other platforms" },
+      { key: "implementation", label: "Implementation", type: "textarea", hideInGrid: true, tooltip: "How this feature will be built — architecture, approach" },
+      { key: "images", label: "Images", type: "image-carousel", hideInModal: true, tooltip: "Click to view and manage images" },
+      { key: "_testCount", label: "Tests", type: "test-count", hideInModal: true, tooltip: "Click to view and manage test cases" },
+      { key: "_projectRefs", label: "Projects", type: "ref-projects", badge: "calc", badgeTooltip: "Computed from code change dependencies", tooltip: "Projects that reference this feature via code change dependencies" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this record was first created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this record was last modified" },
+    ],
+  },
+  data_tables: {
+    label: "Data Tables",
+    apiTable: "_splan_data_tables",
+    idKey: "tableId",
+    nameKey: "tableName",
+    entityType: "table",
+    columns: [
+      { key: "tableName", label: "Table Name", type: "text", required: true, tooltip: "Database table name (snake_case)" },
+      { key: "tableStatus", label: "Status", type: "enum", options: ["live", "planned"], required: true, tooltip: "live = exists in DB, planned = not yet created" },
+      { key: "descriptionPurpose", label: "Description", type: "textarea", tooltip: "What this table stores and why it exists" },
+      { key: "exampleRecords", label: "Example Records", type: "text", hint: "2-5 comma-separated example rows, e.g. USA DeBusk LLC, Valero Energy, Acme Industrial", tooltip: "Example rows to illustrate what records look like" },
+      { key: "recordOwnership", label: "Ownership", type: "enum", options: ["org_private", "org_shared", "system", "user_private"], tooltip: "Who owns rows: org_private (one org), org_shared (visible across orgs), system (global), user_private (per user)" },
+      { key: "tags", label: "Tags", type: "tags", tooltip: "Business types or categories this table applies to" },
+      { key: "_referencedBy", label: "Referenced By", type: "ref-features", badge: "calc", badgeTooltip: "Computed by scanning (table_name) mentions in Feature notes", tooltip: "Features that mention this table in their notes" },
+      { key: "_projectRefs", label: "Projects", type: "ref-projects", badge: "calc", badgeTooltip: "Computed from code change dependencies", tooltip: "Projects that reference this table via code change dependencies" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this record was first created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this record was last modified" },
+    ],
+  },
+  data_fields: {
+    label: "Data Fields",
+    apiTable: "_splan_data_fields",
+    idKey: "fieldId",
+    nameKey: "fieldName",
+    entityType: "field",
+    columns: [
+      { key: "fieldName", label: "Field Name", type: "text", required: true, tooltip: "Column name as it appears in the database" },
+      { key: "dataTableId", label: "Table", type: "fk", fkTable: "data_tables", fkId: "tableId", fkName: "tableName", required: true, tooltip: "Which table this field belongs to" },
+      { key: "fieldStatus", label: "Status", type: "enum", options: ["live", "planned"], required: true, tooltip: "live = exists in DB, planned = not yet created" },
+      { key: "nameReasoning", label: "Name Reasoning", type: "textarea", hint: "Why this name was chosen", hideInGrid: true, tooltip: "Why this field name was chosen over alternatives" },
+      { key: "dataType", label: "Data Type", type: "enum", options: ["UUID", "Text", "Int4", "Date", "Bool", "Timestamp", "JSONB", "Enum", "Array"], required: true, tooltip: "PostgreSQL data type for this column" },
+      { key: "isRequired", label: "Required", type: "boolean", tooltip: "Is this field NOT NULL?" },
+      { key: "isUnique", label: "Unique", type: "boolean", tooltip: "Does this field have a uniqueness constraint?" },
+      { key: "defaultValue", label: "Default Value", type: "text", hideInGrid: true, tooltip: "Default value when not provided" },
+      { key: "isForeignKey", label: "Foreign Key", type: "boolean", tooltip: "Is this field a foreign key to another table?" },
+      { key: "referencesTable", label: "Ref Table", type: "fk", fkTable: "data_tables", fkId: "tableId", fkName: "tableName", conditionalOn: "isForeignKey", tooltip: "If FK, which table does this field reference?" },
+      { key: "referencesField", label: "Ref Field", type: "fk", fkTable: "data_fields", fkId: "fieldId", fkName: "fieldName", conditionalOn: "isForeignKey", cascadeFrom: "referencesTable", cascadeKey: "dataTableId", tooltip: "If FK, which specific field in the referenced table?" },
+      { key: "exampleValues", label: "Examples", type: "text", hint: "2-7 comma-separated example values, e.g. USA DeBusk LLC, Acme Industrial", tooltip: "2-7 example values illustrating what this field contains" },
+      { key: "_referencedBy", label: "Referenced By", type: "ref-features", badge: "calc", badgeTooltip: "Computed by scanning (table.field) mentions in Feature notes", tooltip: "Features that mention this field in their notes" },
+      { key: "_projectRefs", label: "Projects", type: "ref-projects", badge: "calc", badgeTooltip: "Computed from code change dependencies", tooltip: "Projects that reference this field via code change dependencies" },
+    ],
+  },
+  module_use_fields: {
+    label: "Module Use Fields",
+    apiTable: "_splan_module_use_fields",
+    idKey: "id",
+    nameKey: null,
+    entityType: "module_use_field",
+    columns: [
+      { key: "moduleId", label: "Module", type: "fk", fkTable: "modules", fkId: "moduleId", fkName: "moduleName", required: true, tooltip: "Which module uses this field" },
+      { key: "fieldId", label: "Field", type: "fk", fkTable: "data_fields", fkId: "fieldId", fkName: "fieldName", required: true, tooltip: "Which data field is being used" },
+      { key: "purpose", label: "Purpose", type: "textarea", tooltip: "Why this module needs this field" },
+      { key: "useType", label: "Use Type", type: "enum", options: ["Calculation", "View", "Editable"], tooltip: "How the module uses the field: Calculation (derived), View (read-only), Editable (user input)" },
+      { key: "isRequired", label: "Required", type: "boolean", tooltip: "Is this field required within this module's context?" },
+      { key: "displayOrder", label: "Order", type: "int", tooltip: "Controls field ordering within the module's UI" },
+    ],
+  },
+  feature_concerns: {
+    label: "Feature Concerns",
+    apiTable: "_splan_feature_concerns",
+    idKey: "concernId",
+    nameKey: "concernText",
+    entityType: "concern",
+    columns: [
+      { key: "featureId", label: "Feature", type: "fk", fkTable: "features", fkId: "featureId", fkName: "featureName", required: true, tooltip: "Which feature this concern relates to" },
+      { key: "tier", label: "Tier", type: "enum", options: ["1", "2", "3"], hint: "1=extreme, 2=moderate, 3=easy", tooltip: "Severity: 1 = extreme risk, 2 = moderate, 3 = easily mitigated" },
+      { key: "concernText", label: "Concern", type: "textarea", required: true, tooltip: "Description of the risk or concern" },
+      { key: "mitigationText", label: "Mitigation", type: "textarea", tooltip: "How this concern can be addressed or mitigated" },
+      { key: "status", label: "Status", type: "enum", options: ["Open", "Mitigated", "Accepted"], tooltip: "Open = unresolved, Mitigated = addressed, Accepted = acknowledged risk" },
+    ],
+  },
+  data_access_rules: {
+    label: "Access Rules",
+    apiTable: "_splan_data_access_rules",
+    idKey: "ruleId",
+    nameKey: null,
+    entityType: "access_rule",
+    columns: [
+      { key: "tableId", label: "Table", type: "fk", fkTable: "data_tables", fkId: "tableId", fkName: "tableName", required: true, tooltip: "Which data table this access rule applies to" },
+      { key: "businessType", label: "Biz Type", type: "enum", options: [], hint: "Leave empty for all types", tooltip: "Business type this rule targets (empty = all types)" },
+      { key: "role", label: "Role", type: "enum", options: ["owner", "builder", "user"], hint: "Leave empty for all roles", tooltip: "User role this rule targets (empty = all roles)" },
+      { key: "userType", label: "User Type", type: "enum", options: ["organizational", "team", "individual", "seller"], hint: "Leave empty for all user types", tooltip: "User type this rule targets (empty = all user types)" },
+      { key: "tierMin", label: "Tier Min", type: "int", hint: "1=Field, 7=Executive. Leave empty for all.", tooltip: "Minimum org tier level (1=Field worker, 7=Executive)" },
+      { key: "tierMax", label: "Tier Max", type: "int", hint: "1=Field, 7=Executive. Leave empty for all.", tooltip: "Maximum org tier level (1=Field worker, 7=Executive)" },
+      { key: "swimlane", label: "Swimlane", type: "text", hint: "Department name. Leave empty for all.", tooltip: "Department/swimlane this rule applies to (empty = all)" },
+      { key: "accessLevel", label: "Access", type: "enum", options: ["none", "view", "edit", "admin"], required: true, tooltip: "What level of access: none, view (read), edit (write), admin (full)" },
+      { key: "scopeNotes", label: "Scope Notes", type: "textarea", hideInGrid: true, tooltip: "Notes about what scope of data is visible under this rule" },
+      { key: "ownershipNotes", label: "Ownership Notes", type: "textarea", hideInGrid: true, tooltip: "Notes about record ownership implications" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this record was first created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this record was last modified" },
+    ],
+  },
+  data_reviews: {
+    label: "Data Reviews",
+    apiTable: "_splan_feature_data_reviews",
+    idKey: "reviewId",
+    nameKey: null,
+    entityType: "data_review",
+    columns: [
+      { key: "featureId", label: "Feature", type: "fk", fkTable: "features", fkId: "featureId", fkName: "featureName", required: true, tooltip: "Which feature this review covers" },
+      { key: "status", label: "Status", type: "enum", options: ["pending", "approved", "flagged", "rejected"], required: true, tooltip: "Review status: pending, approved, flagged, or rejected" },
+      { key: "summary", label: "Summary", type: "textarea", tooltip: "Summary of review findings" },
+      { key: "checklist", label: "Checklist", type: "checklist", tooltip: "Pre-implementation multi-tenant review checklist items" },
+      { key: "reviewedBy", label: "Reviewed By", type: "text", tooltip: "Name of the person who performed this review" },
+      { key: "reviewedAt", label: "Reviewed At", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when a reviewer submits their review", tooltip: "When the review was submitted" },
+      { key: "notes", label: "Notes", type: "textarea", hideInGrid: true, tooltip: "Additional reviewer notes" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this record was first created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this record was last modified" },
+    ],
+  },
+  concepts: {
+    label: "Concepts",
+    apiTable: "_splan_concepts",
+    idKey: "conceptId",
+    nameKey: "conceptName",
+    entityType: "concept",
+    columns: [
+      { key: "conceptName", label: "Name", type: "text", required: true, tooltip: "Short title for the concept" },
+      { key: "description", label: "Description", type: "textarea", hint: "100 words or less", tooltip: "What this concept represents" },
+      { key: "conceptType", label: "Type", type: "enum", options: ["Idea", "Principle", "Dev Term"], tooltip: "Classification of this concept" },
+      { key: "status", label: "Status", type: "enum", options: ["draft", "active", "superseded", "archived"], tooltip: "Current lifecycle stage of this concept" },
+      { key: "tags", label: "Tags", type: "tags", tooltip: "Freeform tags for categorization and filtering" },
+      { key: "features", label: "Features", type: "multi-fk", fkTable: "features", fkId: "featureId", fkName: "featureName", tooltip: "Features this concept informs or relates to" },
+      { key: "modules", label: "Modules", type: "multi-fk", fkTable: "modules", fkId: "moduleId", fkName: "moduleName", tooltip: "Modules this concept relates to" },
+      { key: "dataTables", label: "Data Tables", type: "multi-fk", fkTable: "data_tables", fkId: "tableId", fkName: "tableName", tooltip: "Data tables this concept relates to" },
+      { key: "notes", label: "Notes", type: "note-fullscreen", tooltip: "Click to open notes in fullscreen editor" },
+      { key: "notesFmt", label: "Notes Fmt", type: "readonly", hideInGrid: true, hideInModal: true },
+      { key: "collapsedSections", label: "Collapsed Sections", type: "readonly", hideInGrid: true, hideInModal: true },
+      { key: "embeddedTables", label: "Embedded Tables", type: "readonly", hideInGrid: true, hideInModal: true },
+      { key: "images", label: "Images", type: "image-carousel", hideInModal: true, tooltip: "Click to view and manage images" },
+      { key: "_testCount", label: "Tests", type: "test-count", hideInModal: true, tooltip: "Click to view and manage test cases" },
+      { key: "_projectRefs", label: "Projects", type: "ref-projects", badge: "calc", badgeTooltip: "Computed from code change dependencies", tooltip: "Projects that reference this concept via code change dependencies" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this record was first created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this record was last modified" },
+    ],
+  },
+  research: {
+    label: "Research",
+    apiTable: "_splan_research",
+    idKey: "researchId",
+    nameKey: "title",
+    entityType: "research",
+    columns: [
+      { key: "title", label: "Title", type: "text", required: true, tooltip: "Research finding title" },
+      { key: "conceptId", label: "Concept", type: "fk", fkTable: "concepts", fkId: "conceptId", fkName: "conceptName", required: true, tooltip: "Which concept this research relates to" },
+      { key: "summary", label: "Summary", type: "textarea", tooltip: "Brief summary of what was found" },
+      { key: "findings", label: "Findings", type: "textarea", hideInGrid: true, tooltip: "Detailed research findings" },
+      { key: "sources", label: "Sources", type: "json-list", tooltip: "URLs and references from the research" },
+      { key: "status", label: "Status", type: "enum", options: ["new", "reviewed", "incorporated", "archived"], tooltip: "new = unread, reviewed = read, incorporated = added to concept notes, archived = no longer relevant" },
+      { key: "researchedAt", label: "Researched", type: "readonly", badge: "ref", badgeTooltip: "When this research was conducted", tooltip: "When the research agent ran" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this record was first created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this record was last modified" },
+    ],
+  },
+  projects: {
+    label: "Projects",
+    apiTable: "_splan_projects",
+    idKey: "projectId",
+    nameKey: "projectName",
+    entityType: "project",
+    columns: [
+      { key: "projectName", label: "Name", type: "text", required: true, tooltip: "Project display name" },
+      { key: "description", label: "Description", type: "textarea", tooltip: "Brief project description" },
+      { key: "githubRepo", label: "GitHub Repo", type: "text", hint: "owner/repo", tooltip: "GitHub repository in owner/repo format" },
+      { key: "status", label: "Status", type: "enum", options: ["active", "paused", "archived"], tooltip: "Current project status" },
+      { key: "branchLiveName", label: "Live Branch", type: "text", tooltip: "Production branch name (default: main)" },
+      { key: "branchPrimaryName", label: "Primary Dev Branch", type: "text", tooltip: "Primary development branch name (default: develop)" },
+      { key: "branchSecondaryName", label: "Secondary Dev Branch", type: "text", tooltip: "Secondary/feature branch name (default: feature)" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this project was created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this project was last modified" },
+    ],
+  },
+  code_changes: {
+    label: "Code Changes",
+    apiTable: "_splan_code_changes",
+    idKey: "changeId",
+    nameKey: "changeName",
+    entityType: "code_change",
+    columns: [
+      { key: "changeName", label: "Change Name", type: "text", required: true, tooltip: "Name or summary of the code change" },
+      { key: "changeType", label: "Type", type: "enum", options: ["Prototype", "Git Push", "Working Through", "Data Change"], tooltip: "Category of this code change" },
+      { key: "branch", label: "Branch", type: "enum", options: ["live", "primary_dev", "secondary_dev"], tooltip: "Which branch this change belongs to" },
+      { key: "implementationPrompt", label: "Impl Prompt", type: "textarea", hideInGrid: true, tooltip: "Implementation description in /ap format" },
+      { key: "executionResults", label: "Results", type: "textarea", hideInGrid: true, tooltip: "Output from executing the change" },
+      { key: "fileLocations", label: "Files", type: "text", tooltip: "Changed file paths" },
+      { key: "failedTests", label: "Failed Tests", type: "readonly", hideInGrid: true, tooltip: "List of test failures" },
+      { key: "failureExplanations", label: "Failure Notes", type: "textarea", hideInGrid: true, tooltip: "Likely explanations for failures" },
+      { key: "implementationGroup", label: "Group", type: "int", tooltip: "Groups related changes from one implementation attempt" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", tooltip: "When this change was recorded" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", tooltip: "When this change was last modified" },
+    ],
+  },
+  change_log: {
+    label: "Change Log",
+    apiTable: "_splan_change_log",
+    idKey: "id",
+    nameKey: null,
+    entityType: "log",
+    readOnly: true,
+    columns: [
+      { key: "entityType", label: "Entity", type: "text" },
+      { key: "entityId", label: "ID", type: "int" },
+      { key: "action", label: "Action", type: "text" },
+      { key: "fieldChanged", label: "Field", type: "text" },
+      { key: "oldValue", label: "Old Value", type: "text" },
+      { key: "newValue", label: "New Value", type: "text" },
+      { key: "reasoning", label: "Reasoning", type: "text" },
+      { key: "changedAt", label: "When", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the change is recorded" },
+    ],
+  },
+  all_test_cases: {
+    label: "Test Cases",
+    apiTable: "_splan_all_tests",
+    idKey: "testId",
+    nameKey: "title",
+    entityType: "test",
+    readOnly: true,
+    columns: [
+      { key: "title", label: "Title", type: "text", tooltip: "Short test description" },
+      { key: "description", label: "Description", type: "textarea", tooltip: "Detailed bulleted description of what this test verifies" },
+      { key: "testType", label: "Test Type", type: "enum", options: ["unit", "integration", "e2e", "acceptance"], tooltip: "Category of test" },
+      { key: "status", label: "Status", type: "enum", options: ["draft", "ready", "passing", "failing", "skipped"], tooltip: "Current test status" },
+      { key: "entityName", label: "Entity", type: "text", tooltip: "The feature, concept, or module this test belongs to" },
+      { key: "entityType", label: "Entity Type", type: "enum", options: ["feature", "concept", "module"], tooltip: "Whether this is a feature, concept, or module test" },
+      { key: "generatedCode", label: "Code", type: "textarea", hideInGrid: true, tooltip: "Test code to run" },
+      { key: "expectedResult", label: "Expected Result", type: "textarea", hideInGrid: true, tooltip: "Expected outcome" },
+      { key: "createdAt", label: "Created", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is created", tooltip: "When this test was created" },
+      { key: "updatedAt", label: "Updated", type: "readonly", badge: "ref", badgeTooltip: "Auto-set when the record is last modified", tooltip: "When this test was last modified" },
+    ],
+  },
+};
+
+export const CRUD_TABS = Object.keys(TABLE_CONFIGS);
+export const SUB_TABS = [...CRUD_TABS.slice(0, CRUD_TABS.indexOf("data_reviews") + 1), "access_matrix", ...CRUD_TABS.slice(CRUD_TABS.indexOf("data_reviews") + 1)];
+
+// Which FK-lookup tabs each tab needs loaded for dropdowns/mentions
+export const TAB_DEPS: Record<string, string[]> = {
+  modules: ["data_tables", "data_fields", "features", "concepts", "code_changes", "projects"],
+  data_tables: ["data_fields", "features", "code_changes", "projects"],
+  data_fields: ["data_tables", "code_changes", "projects"],
+  module_use_fields: ["modules", "data_fields", "data_tables"],
+  features: ["modules", "data_tables", "data_fields", "concepts", "code_changes", "projects"],
+  feature_concerns: ["features"],
+  data_access_rules: ["data_tables"],
+  data_reviews: ["features"],
+  concepts: ["features", "modules", "data_tables", "code_changes", "projects", "research"],
+  research: ["concepts"],
+  projects: ["modules", "features", "concepts", "data_tables", "data_fields"],
+  code_changes: ["projects"],
+  change_log: [],
+  access_matrix: [],
+  all_test_cases: [],
+};
+
+// Which tabs are invalidated when a given tab is saved (FK data changed)
+export const TAB_INVALIDATES: Record<string, string[]> = {
+  modules: ["features", "module_use_fields"],
+  data_tables: ["data_fields", "features", "module_use_fields", "data_access_rules"],
+  data_fields: ["features", "module_use_fields"],
+  features: ["feature_concerns", "data_reviews", "concepts"],
+  concepts: [],
+  code_changes: ["data_tables", "data_fields"],
+};
+
+export const DEFAULT_CHECKLIST_ITEMS = [
+  "Data isolation verified (org_private rows only visible to owning org)",
+  "Cross-org sharing rules documented (if org_shared)",
+  "RLS policy requirements identified",
+  "User type restrictions documented",
+  "Tier-based visibility rules defined",
+  "Swimlane/department filtering specified",
+];
+
+export const PILL_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  // Status
+  Idea: { bg: "rgba(102,102,128,0.15)", text: "#9999b3", border: "rgba(102,102,128,0.3)" },
+  Approved: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  Implemented: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  // Priority
+  Critical: { bg: "rgba(224,85,85,0.15)", text: "#e05555", border: "rgba(224,85,85,0.3)" },
+  High: { bg: "rgba(230,125,74,0.15)", text: "#e67d4a", border: "rgba(230,125,74,0.3)" },
+  Medium: { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.3)" },
+  Low: { bg: "rgba(102,102,128,0.15)", text: "#9999b3", border: "rgba(102,102,128,0.3)" },
+  // Concern status
+  Open: { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.3)" },
+  Mitigated: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  Accepted: { bg: "rgba(108,123,255,0.15)", text: "#6c7bff", border: "rgba(108,123,255,0.3)" },
+  // Ownership
+  org_private: { bg: "rgba(230,125,74,0.15)", text: "#e67d4a", border: "rgba(230,125,74,0.3)" },
+  org_shared: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  system: { bg: "rgba(108,123,255,0.15)", text: "#6c7bff", border: "rgba(108,123,255,0.3)" },
+  user_private: { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.3)" },
+  // Use type
+  Calculation: { bg: "rgba(168,85,247,0.15)", text: "#a855f7", border: "rgba(168,85,247,0.3)" },
+  View: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  Editable: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  // Live/Planned status — tables: live=purple, planned=green; fields: live=blue, planned=green
+  live: { bg: "rgba(168,85,247,0.15)", text: "#a855f7", border: "rgba(168,85,247,0.3)" },
+  planned: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  "field:live": { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  "field:planned": { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  // Change log actions
+  create: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  update: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  delete: { bg: "rgba(224,85,85,0.15)", text: "#e05555", border: "rgba(224,85,85,0.3)" },
+  // Access levels
+  none: { bg: "rgba(102,102,128,0.15)", text: "#666680", border: "rgba(102,102,128,0.3)" },
+  view: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  edit: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  admin: { bg: "rgba(168,85,247,0.15)", text: "#a855f7", border: "rgba(168,85,247,0.3)" },
+  // Concept statuses
+  draft: { bg: "rgba(102,102,128,0.15)", text: "#9999b3", border: "rgba(102,102,128,0.3)" },
+  active: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  superseded: { bg: "rgba(230,125,74,0.15)", text: "#e67d4a", border: "rgba(230,125,74,0.3)" },
+  archived: { bg: "rgba(102,102,128,0.15)", text: "#666680", border: "rgba(102,102,128,0.3)" },
+  // Concept types (new)
+  Idea: { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.3)" },
+  Principle: { bg: "rgba(108,123,255,0.15)", text: "#6c7bff", border: "rgba(108,123,255,0.3)" },
+  "Dev Term": { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  // Legacy concept types (for existing rows not yet re-categorized)
+  idea: { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.3)" },
+  principle: { bg: "rgba(108,123,255,0.15)", text: "#6c7bff", border: "rgba(108,123,255,0.3)" },
+  domain_term: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  pattern: { bg: "rgba(168,85,247,0.15)", text: "#a855f7", border: "rgba(168,85,247,0.3)" },
+  constraint: { bg: "rgba(224,85,85,0.15)", text: "#e05555", border: "rgba(224,85,85,0.3)" },
+  // Review statuses
+  pending: { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.3)" },
+  approved: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  flagged: { bg: "rgba(224,85,85,0.15)", text: "#e05555", border: "rgba(224,85,85,0.3)" },
+  rejected: { bg: "rgba(224,85,85,0.15)", text: "#e05555", border: "rgba(224,85,85,0.3)" },
+  // Test types
+  unit: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  integration: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  e2e: { bg: "rgba(168,85,247,0.15)", text: "#a855f7", border: "rgba(168,85,247,0.3)" },
+  acceptance: { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.3)" },
+  // Test statuses
+  ready: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+  passing: { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "rgba(78,203,113,0.3)" },
+  failing: { bg: "rgba(224,85,85,0.15)", text: "#e05555", border: "rgba(224,85,85,0.3)" },
+  skipped: { bg: "rgba(102,102,128,0.15)", text: "#666680", border: "rgba(102,102,128,0.3)" },
+  // Entity types (for all_test_cases tab)
+  feature: { bg: "rgba(230,125,74,0.15)", text: "#e67d4a", border: "rgba(230,125,74,0.3)" },
+  concept: { bg: "rgba(108,123,255,0.15)", text: "#6c7bff", border: "rgba(108,123,255,0.3)" },
+  module: { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" },
+};
+
+export const MODULE_FEATURE_COLS = [
+  { key: "featureName", label: "Feature Name", defaultVisible: true },
+  { key: "modules", label: "Modules", defaultVisible: false },
+  { key: "status", label: "Status", defaultVisible: true },
+  { key: "priority", label: "Priority", defaultVisible: true },
+  { key: "platforms", label: "Platforms", defaultVisible: true },
+  { key: "description", label: "Description", defaultVisible: true },
+  { key: "featureTags", label: "Tags", defaultVisible: false },
+  { key: "createdAt", label: "Created", defaultVisible: false },
+  { key: "updatedAt", label: "Updated", defaultVisible: false },
+] as const;
+
+export const PLATFORM_OPTIONS = ["Web App", "Android", "Apple", "Other"] as const;
+
+export const PLATFORM_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  "Web App": { bg: "rgba(78,203,113,0.15)", text: "#4ecb71", border: "#4ecb7144" },
+  "Android": { bg: "rgba(78,167,246,0.15)", text: "#4ea7f6", border: "#4ea7f644" },
+  "Apple": { bg: "rgba(168,85,247,0.15)", text: "#a855f7", border: "#a855f744" },
+  "Other": { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "#f2b66144" },
+};
+
+export const TAG_TIER_COLORS: Record<number, { bg: string; text: string; border: string }> = {
+  1: { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.4)" },
+  2: { bg: "rgba(108,123,255,0.12)", text: "#6c7bff", border: "rgba(108,123,255,0.3)" },
+};
+
+// Map of platform note field keys to their label and which platform triggers visibility
+export const PLATFORM_NOTE_SECTIONS = [
+  { key: "notes", fmtKey: "notesFmt", label: "Web App Notes", platform: "Web App" },
+  { key: "nativeNotes", fmtKey: "nativeNotesFmt", label: "Native Notes", platform: null, showWhenAnyNative: true },
+  { key: "androidNotes", fmtKey: "androidNotesFmt", label: "Android Notes", platform: "Android" },
+  { key: "appleNotes", fmtKey: "appleNotesFmt", label: "Apple Notes", platform: "Apple" },
+  { key: "otherNotes", fmtKey: "otherNotesFmt", label: "Other Notes", platform: "Other" },
+] as const;
+
+export const OWNERSHIP_OPTIONS = [
+  { value: "org_private", label: "Org Private — rows belong to one org, invisible to others", example: "tools, processes, projects" },
+  { value: "org_shared", label: "Org Shared — rows created by one org but visible/usable by others", example: "business_listings, library_tools" },
+  { value: "system", label: "System — global rows not scoped to any org, admin-managed", example: "business_types, app_settings, canonical_entities" },
+  { value: "user_private", label: "User Private — rows belong to a specific user profile, not org-wide", example: "nex_ask_questions, perspectives" },
+];
+
+export const EMPTY_IMAGES: Array<{ id: string; url: string; title: string; createdAt: string }> = [];
+
+// Color palette for group header accents (cycled)
+export const GROUP_COLORS = ["#5bc0de", "#4ecb71", "#a855f7", "#f2b661", "#e67d4a", "#6c7bff", "#e05555", "#14b8a6"];
+
+export const DATA_TYPE_DESCRIPTIONS: Array<{ value: string; desc: string }> = [
+  { value: "UUID", desc: "Unique identifier (128-bit)" },
+  { value: "Text", desc: "Variable-length string" },
+  { value: "Int4", desc: "32-bit integer number" },
+  { value: "Date", desc: "Calendar date (no time)" },
+  { value: "Bool", desc: "True / false" },
+  { value: "Timestamp", desc: "Date + time with timezone" },
+  { value: "JSONB", desc: "Structured JSON object" },
+  { value: "Enum", desc: "Fixed set of allowed values" },
+  { value: "Array", desc: "List of values (typed)" },
+];
+
+export const FIELD_SUB_COLS: Array<{ key: string; label: string; width?: string; badge?: string; tooltip?: string }> = [
+  { key: "fieldName", label: "Field Name", width: "18%", tooltip: "Column name as it appears in the database" },
+  { key: "fieldStatus", label: "Status", width: "6%", tooltip: "live = exists in DB, planned = not yet created" },
+  { key: "dataType", label: "Type", width: "7%", tooltip: "PostgreSQL data type for this column" },
+  { key: "isRequired", label: "Req", width: "4%", tooltip: "Is this field required (NOT NULL)?" },
+  { key: "isUnique", label: "Unique", width: "5%", tooltip: "Does this field have a uniqueness constraint?" },
+  { key: "isForeignKey", label: "FK", width: "4%", tooltip: "Is this field a foreign key referencing another table?" },
+  { key: "referencesTable", label: "Ref Table", width: "10%", tooltip: "If FK, which table does this field reference?" },
+  { key: "referencesField", label: "Ref Field", width: "10%", tooltip: "If FK, which specific field in that table?" },
+  { key: "exampleValues", label: "Examples", badge: "2-7", tooltip: "2-7 example values illustrating what this field contains" },
+  { key: "_referencedBy", label: "Referenced By", width: "12%", badge: "calc", tooltip: "Features that mention this field in their notes" },
+];
+
+export const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 0] as const; // 0 = All

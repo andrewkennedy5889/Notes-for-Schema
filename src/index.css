@@ -1,0 +1,118 @@
+@import "tailwindcss";
+
+/* ─── Dark theme CSS variables ───────────────────────────────────────────────── */
+
+:root {
+  /* Background & surfaces */
+  --color-background: #0d1117;
+  --color-surface: #161b22;
+  --color-surface-raised: #1c2128;
+
+  /* Text */
+  --color-text: #e6edf3;
+  --color-text-muted: #8b949e;
+  --color-text-subtle: #6e7681;
+
+  /* Borders & dividers */
+  --color-divider: #30363d;
+  --color-border: #21262d;
+
+  /* Primary accent: Kendo blue */
+  --color-primary: #428bca;
+  --color-primary-rgb: 66, 139, 202;
+  --color-primary-hover: #3578b8;
+  --color-primary-text: #ffffff;
+
+  /* Status colors */
+  --color-success: #4ecb71;
+  --color-warning: #f2b661;
+  --color-error: #e05555;
+  --color-info: #5bc0de;
+
+  /* Focus ring */
+  --color-focus: rgba(66, 139, 202, 0.5);
+
+  /* Scrollbar */
+  scrollbar-color: #30363d #0d1117;
+  scrollbar-width: thin;
+}
+
+/* ─── Base reset ─────────────────────────────────────────────────────────────── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  background: var(--color-background);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+
+/* ─── Focus ring ─────────────────────────────────────────────────────────────── */
+
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* ─── Form inputs ────────────────────────────────────────────────────────────── */
+
+input, textarea, select {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-divider);
+  border-radius: 6px;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: var(--color-primary);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-focus);
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--color-text-subtle);
+}
+
+/* ─── Tailwind dark mode compat ──────────────────────────────────────────────── */
+
+.dark { color-scheme: dark; }
+
+/* ─── Fullscreen note wrapper ───────────────────────────────────────────────── */
+
+.fullscreen-note-content textarea {
+  min-height: 600px !important;
+  resize: vertical !important;
+}
+
+/* Make the resize handle more visible on dark backgrounds */
+.fullscreen-note-content textarea::-webkit-resizer {
+  background: linear-gradient(-45deg, transparent 4px, var(--color-text-muted) 4px, var(--color-text-muted) 5px, transparent 5px, transparent 8px, var(--color-text-muted) 8px, var(--color-text-muted) 9px, transparent 9px);
+  cursor: ns-resize;
+}

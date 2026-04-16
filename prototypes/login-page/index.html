@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nexus — Login</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --gold:      #FCC30A;
+      --bg-page:   #0a0a0a;
+      --bg-card:   #111;
+      --border:    #333;
+      --muted:     #888;
+      --white:     #fff;
+      --bg-input:  #181818;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg-page);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+      color: var(--white);
+    }
+
+    .card-wrap {
+      width: 100%;
+      max-width: 480px;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: visible;
+    }
+
+    /* ── Header ─────────────────────────────── */
+    .card-header {
+      padding: 32px 24px 8px;
+      text-align: center;
+    }
+    .card-header h1 {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--white);
+      letter-spacing: -0.3px;
+    }
+
+    /* ── Tabs ───────────────────────────────── */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 12px 8px;
+      font-size: 14px;
+      font-weight: 500;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      color: var(--muted);
+      transition: color 0.15s;
+      margin-bottom: -1px;
+    }
+    .tab-btn.active {
+      color: var(--gold);
+      border-bottom-color: var(--gold);
+    }
+
+    /* ── Form area ──────────────────────────── */
+    .form-body {
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* ── Field ──────────────────────────────── */
+    .field label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .field label .optional {
+      color: #555;
+    }
+    .field input {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 14px;
+      font-family: inherit;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--white);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .field input::placeholder { color: #555; }
+    .field input:focus {
+      border-color: var(--gold);
+      box-shadow: 0 0 0 2px rgba(252, 195, 10, 0.25);
+    }
+    .field-hint {
+      font-size: 11px;
+      color: var(--gold);
+      margin-top: 4px;
+    }
+    .field-hint.dim { color: #555; }
+
+    /* ── Buttons ────────────────────────────── */
+    .btn-primary {
+      width: 100%;
+      padding: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      font-family: inherit;
+      background: var(--gold);
+      color: #000;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn-primary:hover { opacity: 0.9; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-text {
+      background: none;
+      border: none;
+      font-family: inherit;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+      transition: opacity 0.15s;
+    }
+    .btn-text:hover { text-decoration: underline; }
+
+    /* Circle arrow */
+    .btn-circle {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      border: none;
+      background: var(--border);
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .btn-circle.ready {
+      background: var(--gold);
+      color: #000;
+    }
+    .btn-circle:disabled { opacity: 0.3; cursor: not-allowed; }
+    .btn-circle-wrap {
+      display: flex;
+      justify-content: center;
+      padding-top: 8px;
+    }
+
+    /* Back row */
+    .back-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: -4px;
+    }
+    .back-row .spacer { flex: 1; }
+    .back-row .step-label { font-size: 12px; color: #555; }
+    .btn-back {
+      background: none;
+      border: none;
+      font-family: inherit;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: opacity 0.15s;
+    }
+    .btn-back:hover { opacity: 0.7; }
+
+    /* ── Alerts ─────────────────────────────── */
+    .alert {
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    .alert-error {
+      color: #fca5a5;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+    }
+    .alert-success {
+      color: #a3e635;
+      background: rgba(163, 230, 53, 0.08);
+      border: 1px solid rgba(163, 230, 53, 0.25);
+    }
+    .alert-info {
+      color: #fcd34d;
+      background: rgba(252, 211, 77, 0.08);
+      border: 1px solid rgba(252, 211, 77, 0.3);
+    }
+
+    /* ── Autocomplete dropdown ──────────────── */
+    .autocomplete-wrap {
+      position: relative;
+    }
+    .dropdown {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      background: #1a1a1a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+      z-index: 100;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+    .dropdown-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      width: 100%;
+      background: none;
+      border: none;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.1s;
+    }
+    .dropdown-item:last-child { border-bottom: none; }
+    .dropdown-item:hover { background: #252525; }
+    .dropdown-item .org-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      background: #333;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .dropdown-item .org-name {
+      font-size: 14px;
+      color: var(--white);
+    }
+    .dropdown-item .org-url {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+    .dropdown-manual {
+      padding: 10px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--gold);
+      background: none;
+      border: none;
+      width: 100%;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .dropdown-manual:hover { background: #252525; }
+
+    /* Selected listing banner */
+    .selected-banner {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 8px;
+      background: rgba(252, 195, 10, 0.08);
+      border: 1px solid var(--gold);
+    }
+    .selected-banner .org-name-main {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--white);
+    }
+    .selected-banner .org-url-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .selected-banner .flex-fill { flex: 1; min-width: 0; }
+    .btn-change {
+      font-size: 12px;
+      color: var(--muted);
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 8px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: opacity 0.15s;
+    }
+    .btn-change:hover { opacity: 0.7; }
+
+    /* ── Email confirmation screen ──────────── */
+    .confirm-screen {
+      padding: 32px 24px;
+      text-align: center;
+    }
+    .confirm-screen .emoji { font-size: 48px; margin-bottom: 16px; }
+    .confirm-screen h2 { font-size: 20px; font-weight: 700; color: var(--white); margin-bottom: 12px; }
+    .confirm-screen .desc {
+      font-size: 14px;
+      color: var(--muted);
+      margin-bottom: 12px;
+      line-height: 1.5;
+    }
+    .confirm-screen .warn {
+      font-size: 12px;
+      font-weight: 600;
+      color: #ef4444;
+      margin-bottom: 12px;
+      line-height: 1.5;
+    }
+    .confirm-screen .sub {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 20px;
+      line-height: 1.5;
+    }
+    .btn-gold-text {
+      background: none;
+      border: none;
+      font-family: inherit;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--gold);
+      transition: opacity 0.15s;
+    }
+    .btn-gold-text:hover { text-decoration: underline; }
+
+    /* ── Redirect screen ────────────────────── */
+    .redirect-msg {
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 14px;
+      text-align: center;
+      color: #a3e635;
+      background: rgba(163, 230, 53, 0.08);
+      border: 1px solid rgba(163, 230, 53, 0.25);
+    }
+
+    /* Hidden */
+    .hidden { display: none !important; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<div class="card-wrap">
+  <div class="card" id="mainCard">
+
+    <!-- ════════════════════════════════════════
+         EMAIL CONFIRMATION SCREEN
+         (hidden until signup completes)
+    ════════════════════════════════════════ -->
+    <div id="confirmScreen" class="confirm-screen hidden">
+      <div class="emoji">📧</div>
+      <h2>Check your email</h2>
+      <p class="desc">
+        We sent a confirmation link to <strong id="confirmEmail" style="color:#fff"></strong>.
+        Please check your inbox and click the link to verify your account.
+      </p>
+      <p class="warn">
+        Important: Open the confirmation link on the same device you signed up from.
+        We recommend signing up on a desktop — do not open the link on your phone if you registered on a computer.
+      </p>
+      <p class="sub">Didn't receive it? Check your spam folder or try signing up again.</p>
+      <button class="btn-gold-text" onclick="showSignIn()">Back to Sign In</button>
+    </div>
+
+    <!-- ════════════════════════════════════════
+         MAIN LOGIN CARD
+         (header + tabs + form)
+    ════════════════════════════════════════ -->
+    <div id="loginCard">
+
+      <div class="card-header">
+        <h1>Nexus</h1>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" id="tabSignin" onclick="switchTab('signin')">Sign In</button>
+        <button class="tab-btn" id="tabSignup" onclick="switchTab('signup')">New Account / Org</button>
+      </div>
+
+      <!-- ═══════════════
+           SIGN IN PANEL
+      ═══════════════ -->
+      <div id="panelSignin" class="form-body">
+
+        <div class="field">
+          <label for="siEmail">Email</label>
+          <input type="email" id="siEmail" placeholder="you@example.com" oninput="clearSigninError(); clearResetSent();" />
+        </div>
+
+        <div class="field">
+          <label for="siPass">Password</label>
+          <input type="password" id="siPass" placeholder="••••••••" oninput="clearSigninError();" onkeydown="if(event.key==='Enter') submitSignin();" />
+        </div>
+
+        <!-- Forgot password link / sent banner -->
+        <div id="forgotWrap">
+          <button class="btn-text" onclick="handleForgotPassword()">Forgot password?</button>
+        </div>
+        <div id="resetSentBanner" class="alert alert-success hidden" style="font-size:12px;">
+          Password reset email sent! Check your inbox.
+        </div>
+
+        <!-- Error -->
+        <div id="siError" class="alert alert-error hidden"></div>
+
+        <!-- Submit -->
+        <button class="btn-primary" id="siBtn" onclick="submitSignin()">Sign In</button>
+
+        <!-- Redirecting message -->
+        <div id="siRedirect" class="redirect-msg hidden">Redirecting to dashboard...</div>
+
+      </div><!-- /panelSignin -->
+
+
+      <!-- ═══════════════════════════════════
+           SIGNUP PANEL
+      ═══════════════════════════════════ -->
+      <div id="panelSignup" class="form-body hidden">
+
+        <!-- ── STEP 1 ── -->
+        <div id="suStep1">
+
+          <div class="field" id="fullNameField">
+            <label for="suName">Full Name</label>
+            <input type="text" id="suName" placeholder="Jane Smith" oninput="updateAdvanceBtn();" />
+          </div>
+
+          <div class="field" style="margin-top:16px;">
+            <label for="suEmail">Email</label>
+            <input type="email" id="suEmail" placeholder="you@example.com" oninput="updateAdvanceBtn();" />
+          </div>
+
+          <!-- Error -->
+          <div id="suStep1Error" class="alert alert-error hidden" style="margin-top:16px;"></div>
+
+          <!-- Circle advance button -->
+          <div class="btn-circle-wrap" style="margin-top:16px;">
+            <button class="btn-circle" id="advanceBtn" onclick="handleAdvance()" disabled>
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <path d="M7 4L13 10L7 16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </div><!-- /suStep1 -->
+
+
+        <!-- ── STEP 2 ── -->
+        <div id="suStep2" class="hidden">
+
+          <!-- Back + Step label -->
+          <div class="back-row">
+            <button class="btn-back" onclick="goBackToStep1()">
+              <svg width="14" height="14" viewBox="0 0 20 20" fill="none">
+                <path d="M13 4L7 10L13 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              Back
+            </button>
+            <div class="spacer"></div>
+            <div class="step-label">Step 2 of 2</div>
+          </div>
+
+          <!-- Password field -->
+          <div class="field" style="margin-top:4px;">
+            <label for="suPass">Password</label>
+            <input type="password" id="suPass" placeholder="••••••••" oninput="clearStep2Error();" />
+            <div class="field-hint">Minimum 8 characters</div>
+          </div>
+
+          <!-- Company search / autocomplete -->
+          <div class="field autocomplete-wrap" id="companySearchWrap" style="margin-top:4px;">
+            <label for="companyInput" id="companyLabel">Search Company</label>
+            <input
+              type="text"
+              id="companyInput"
+              placeholder="Search by company name..."
+              oninput="handleCompanyInput()"
+              onfocus="handleCompanyFocus()"
+              autocomplete="off"
+            />
+            <!-- Dropdown -->
+            <div id="companyDropdown" class="dropdown hidden">
+              <!-- items injected by JS -->
+            </div>
+          </div>
+
+          <!-- Selected company banner (hidden until selection) -->
+          <div id="selectedBanner" class="selected-banner hidden">
+            <div class="org-avatar" id="selectedAvatar"></div>
+            <div class="flex-fill">
+              <div class="org-name-main" id="selectedName"></div>
+              <div class="org-url-sub" id="selectedUrl"></div>
+            </div>
+            <button class="btn-change" onclick="clearSelectedCompany()">Change</button>
+          </div>
+
+          <!-- Company website (manual entry only) -->
+          <div class="field hidden" id="companyWebsiteWrap" style="margin-top:4px;">
+            <label for="companyWebsite">Company Website <span class="optional">(optional)</span></label>
+            <input type="text" id="companyWebsite" placeholder="https://acme.com" onblur="normalizeWebsite('companyWebsite')" />
+          </div>
+
+          <!-- Back to search (manual entry mode) -->
+          <button id="backToSearchBtn" class="btn-gold-text hidden" style="font-size:12px;" onclick="exitManualEntry()">
+            ← Search existing companies instead
+          </button>
+
+          <!-- Error -->
+          <div id="suStep2Error" class="alert alert-error hidden" style="margin-top:4px;"></div>
+
+          <!-- Submit -->
+          <button class="btn-primary" id="suSubmitBtn" onclick="submitSignup()" style="margin-top:4px;">Create Account</button>
+
+        </div><!-- /suStep2 -->
+
+      </div><!-- /panelSignup -->
+
+    </div><!-- /loginCard -->
+
+  </div><!-- /card -->
+</div><!-- /card-wrap -->
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════
+const MOCK_COMPANIES = [
+  { id: 1, name: "USA DeBusk",   website: "https://usadebusk.com/", initial: "U" },
+  { id: 2, name: "Acme Corp",    website: "https://acme.com",        initial: "A" },
+  { id: 3, name: "TechStart Inc",website: "https://techstart.io",    initial: "T" },
+];
+
+let activeTab       = "signin";
+let signupStep      = 1;
+let selectedCompany = null;   // { id, name, website, initial }
+let manualEntry     = false;
+let siLoading       = false;
+
+// ═══════════════════════════════════════════════════════════
+// TAB SWITCHING
+// ═══════════════════════════════════════════════════════════
+function switchTab(tab) {
+  activeTab = tab;
+
+  document.getElementById("tabSignin").classList.toggle("active", tab === "signin");
+  document.getElementById("tabSignup").classList.toggle("active", tab === "signup");
+
+  document.getElementById("panelSignin").classList.toggle("hidden", tab !== "signin");
+  document.getElementById("panelSignup").classList.toggle("hidden", tab !== "signup");
+
+  // Reset sign-in error state when switching away
+  clearSigninError();
+  clearResetSent();
+  document.getElementById("suStep1Error").classList.add("hidden");
+  document.getElementById("suStep2Error").classList.add("hidden");
+}
+
+// ═══════════════════════════════════════════════════════════
+// SIGN IN
+// ═══════════════════════════════════════════════════════════
+function clearSigninError() {
+  document.getElementById("siError").classList.add("hidden");
+}
+
+function clearResetSent() {
+  document.getElementById("resetSentBanner").classList.add("hidden");
+  document.getElementById("forgotWrap").classList.remove("hidden");
+}
+
+function showSigninError(msg) {
+  const el = document.getElementById("siError");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+}
+
+function handleForgotPassword() {
+  const email = document.getElementById("siEmail").value.trim().toLowerCase();
+  if (!email || !email.includes("@")) {
+    showSigninError("Please enter your email address above first.");
+    return;
+  }
+  // Mock — show success banner, hide the "forgot" link
+  document.getElementById("forgotWrap").classList.add("hidden");
+  document.getElementById("resetSentBanner").classList.remove("hidden");
+  clearSigninError();
+}
+
+function submitSignin() {
+  if (siLoading) return;
+
+  const email = document.getElementById("siEmail").value.trim();
+  const pass  = document.getElementById("siPass").value;
+
+  if (!email || !pass) {
+    showSigninError("Please enter your email and password.");
+    return;
+  }
+
+  clearSigninError();
+  siLoading = true;
+  const btn = document.getElementById("siBtn");
+  btn.disabled = true;
+  btn.textContent = "...";
+
+  // Mock: simulate 1.2s then show redirect message
+  setTimeout(() => {
+    siLoading = false;
+    btn.classList.add("hidden");
+    document.getElementById("siRedirect").classList.remove("hidden");
+  }, 1200);
+}
+
+// ═══════════════════════════════════════════════════════════
+// SIGNUP — STEP 1
+// ═══════════════════════════════════════════════════════════
+function updateAdvanceBtn() {
+  const name  = document.getElementById("suName").value.trim();
+  const email = document.getElementById("suEmail").value.trim();
+  const hasValidEmail = email.includes("@") && email.split("@")[1]?.includes(".");
+  const canAdvance = hasValidEmail && name.length > 0;
+
+  const btn = document.getElementById("advanceBtn");
+  btn.disabled = !canAdvance;
+  btn.classList.toggle("ready", canAdvance);
+}
+
+function handleAdvance() {
+  const name  = document.getElementById("suName").value.trim();
+  const email = document.getElementById("suEmail").value.trim();
+
+  if (!name || !email.includes("@")) {
+    const err = document.getElementById("suStep1Error");
+    err.textContent = "Please enter your full name and a valid email.";
+    err.classList.remove("hidden");
+    return;
+  }
+
+  document.getElementById("suStep1Error").classList.add("hidden");
+  goToStep2();
+}
+
+function goToStep2() {
+  signupStep = 2;
+  document.getElementById("suStep1").classList.add("hidden");
+  document.getElementById("suStep2").classList.remove("hidden");
+  document.getElementById("suPass").focus();
+}
+
+function goBackToStep1() {
+  signupStep = 1;
+  document.getElementById("suStep2").classList.add("hidden");
+  document.getElementById("suStep1").classList.remove("hidden");
+  // Reset company state
+  clearSelectedCompany();
+  exitManualEntry();
+  document.getElementById("companyInput").value = "";
+  document.getElementById("companyDropdown").classList.add("hidden");
+  document.getElementById("suStep2Error").classList.add("hidden");
+}
+
+// ═══════════════════════════════════════════════════════════
+// SIGNUP — COMPANY AUTOCOMPLETE
+// ═══════════════════════════════════════════════════════════
+let dropdownVisible = false;
+
+function handleCompanyInput() {
+  if (manualEntry) return;  // In manual mode, just type normally
+  const q = document.getElementById("companyInput").value.trim().toLowerCase();
+  if (q.length < 1) {
+    closeDropdown();
+    return;
+  }
+  const matches = MOCK_COMPANIES.filter(c => c.name.toLowerCase().includes(q));
+  renderDropdown(matches, q);
+}
+
+function handleCompanyFocus() {
+  if (manualEntry) return;
+  const q = document.getElementById("companyInput").value.trim().toLowerCase();
+  if (q.length >= 1) {
+    const matches = MOCK_COMPANIES.filter(c => c.name.toLowerCase().includes(q));
+    renderDropdown(matches, q);
+  }
+}
+
+function renderDropdown(matches, q) {
+  const dd = document.getElementById("companyDropdown");
+  dd.innerHTML = "";
+
+  matches.forEach(co => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "dropdown-item";
+    item.innerHTML = `
+      <div class="org-avatar">${co.initial}</div>
+      <div>
+        <div class="org-name">${co.name}</div>
+        <div class="org-url">${co.website}</div>
+      </div>
+    `;
+    item.onclick = () => selectCompany(co);
+    dd.appendChild(item);
+  });
+
+  // "Not listed" link always visible in dropdown
+  const manual = document.createElement("button");
+  manual.type = "button";
+  manual.className = "dropdown-manual";
+  manual.textContent = "+ My company isn't listed — add it manually";
+  manual.onclick = () => enterManualMode();
+  dd.appendChild(manual);
+
+  dd.classList.remove("hidden");
+  dropdownVisible = true;
+}
+
+function closeDropdown() {
+  document.getElementById("companyDropdown").classList.add("hidden");
+  dropdownVisible = false;
+}
+
+function selectCompany(co) {
+  selectedCompany = co;
+  closeDropdown();
+
+  // Hide search field, show banner
+  document.getElementById("companySearchWrap").classList.add("hidden");
+  const banner = document.getElementById("selectedBanner");
+  document.getElementById("selectedAvatar").textContent = co.initial;
+  document.getElementById("selectedName").textContent   = co.name;
+  const urlEl = document.getElementById("selectedUrl");
+  if (co.website) { urlEl.textContent = co.website; urlEl.style.display = ""; }
+  else             { urlEl.style.display = "none"; }
+  banner.classList.remove("hidden");
+}
+
+function clearSelectedCompany() {
+  selectedCompany = null;
+  document.getElementById("selectedBanner").classList.add("hidden");
+  document.getElementById("companySearchWrap").classList.remove("hidden");
+  document.getElementById("companyLabel").textContent = "Search Company";
+  document.getElementById("companyInput").value = "";
+  document.getElementById("companyInput").placeholder = "Search by company name...";
+  document.getElementById("companyWebsiteWrap").classList.add("hidden");
+  document.getElementById("backToSearchBtn").classList.add("hidden");
+  manualEntry = false;
+}
+
+function enterManualMode() {
+  manualEntry = true;
+  closeDropdown();
+  document.getElementById("companyLabel").textContent = "Company Name";
+  document.getElementById("companyInput").placeholder = "Acme Corp";
+  document.getElementById("companyInput").value = "";
+  document.getElementById("companyWebsiteWrap").classList.remove("hidden");
+  document.getElementById("backToSearchBtn").classList.remove("hidden");
+}
+
+function exitManualEntry() {
+  manualEntry = false;
+  document.getElementById("companyLabel").textContent = "Search Company";
+  document.getElementById("companyInput").placeholder = "Search by company name...";
+  document.getElementById("companyInput").value = "";
+  document.getElementById("companyWebsiteWrap").classList.add("hidden");
+  document.getElementById("backToSearchBtn").classList.add("hidden");
+}
+
+// Close dropdown on outside click
+document.addEventListener("mousedown", function(e) {
+  const wrap = document.getElementById("companySearchWrap");
+  if (wrap && !wrap.contains(e.target)) closeDropdown();
+});
+
+// ═══════════════════════════════════════════════════════════
+// SIGNUP — STEP 2 SUBMIT
+// ═══════════════════════════════════════════════════════════
+function clearStep2Error() {
+  document.getElementById("suStep2Error").classList.add("hidden");
+}
+
+function showStep2Error(msg) {
+  const el = document.getElementById("suStep2Error");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+}
+
+function submitSignup() {
+  const pass    = document.getElementById("suPass").value;
+  const email   = document.getElementById("suEmail").value.trim();
+  const company = manualEntry
+    ? document.getElementById("companyInput").value.trim()
+    : selectedCompany?.name || "";
+
+  if (pass.length < 8) {
+    showStep2Error("Password must be at least 8 characters.");
+    return;
+  }
+  if (!company) {
+    showStep2Error("Please search for or enter your company name.");
+    return;
+  }
+
+  clearStep2Error();
+  const btn = document.getElementById("suSubmitBtn");
+  btn.disabled = true;
+  btn.textContent = "...";
+
+  // Mock: simulate 1s then show confirmation screen
+  setTimeout(() => showConfirmationScreen(email), 1000);
+}
+
+// ═══════════════════════════════════════════════════════════
+// CONFIRMATION SCREEN
+// ═══════════════════════════════════════════════════════════
+function showConfirmationScreen(email) {
+  document.getElementById("confirmEmail").textContent = email;
+  document.getElementById("loginCard").classList.add("hidden");
+  document.getElementById("confirmScreen").classList.remove("hidden");
+}
+
+function showSignIn() {
+  // Reset everything and go back to Sign In tab
+  document.getElementById("confirmScreen").classList.add("hidden");
+  document.getElementById("loginCard").classList.remove("hidden");
+
+  // Reset signup form
+  document.getElementById("suName").value     = "";
+  document.getElementById("suEmail").value    = "";
+  document.getElementById("suPass").value     = "";
+  document.getElementById("companyInput").value = "";
+  document.getElementById("companyWebsite").value = "";
+  goBackToStep1();
+  document.getElementById("suStep1").classList.remove("hidden");
+  document.getElementById("suSubmitBtn").disabled = false;
+  document.getElementById("suSubmitBtn").textContent = "Create Account";
+  updateAdvanceBtn();
+
+  // Reset sign-in form
+  document.getElementById("siEmail").value = "";
+  document.getElementById("siPass").value  = "";
+  document.getElementById("siBtn").disabled = false;
+  document.getElementById("siBtn").textContent = "Sign In";
+  document.getElementById("siBtn").classList.remove("hidden");
+  document.getElementById("siRedirect").classList.add("hidden");
+  clearSigninError();
+  clearResetSent();
+  siLoading = false;
+
+  switchTab("signin");
+}
+
+// ═══════════════════════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════════════════════
+function normalizeWebsite(fieldId) {
+  const el = document.getElementById(fieldId);
+  const v  = el.value.trim();
+  if (v && !/^https?:\/\//i.test(v)) {
+    el.value = "https://" + v;
+  }
+}
+</script>
+
+</body>
+</html>

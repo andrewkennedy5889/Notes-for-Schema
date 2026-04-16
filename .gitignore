@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Database (local data — deployed instance has its own)
+*.db
+*.db-wal
+*.db-shm
+
+# Uploaded images (local data)
+Image Storage/
+
+# Secrets & local config
+.github-config.json
+.env
+.mcp.json
+claude-code-mcp-config.json
+start-with-claude.ps1
+
+# Agent workspace
+.splan/
+
+# Planning artifacts
+.planning/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
