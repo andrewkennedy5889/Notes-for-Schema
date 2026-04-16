@@ -43,7 +43,15 @@ export function normalizeGroupingConfig(raw: unknown): GroupingConfig | null {
   const obj = raw as Record<string, unknown>;
 
   // Already new flat-rules format (has top-level rules array, no layers)
-  if (Array.isArray(obj.rules) && !("layers" in obj)) return raw as GroupingConfig;
+  if (Array.isArray(obj.rules) && !("layers" in obj)) {
+    const cfg = raw as GroupingConfig;
+    cfg.rules = cfg.rules.map((r) => ({
+      ...r,
+      conditions: r.conditions || [],
+      logic: r.logic || "AND" as const,
+    }));
+    return cfg;
+  }
 
   // Old multi-layer format: { layers: [{ rules, ungroupedLabel, ... }], ungroupedLabel }
   if (Array.isArray(obj.layers)) {
