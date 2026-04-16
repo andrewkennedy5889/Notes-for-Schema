@@ -50,7 +50,7 @@ import PrototypesGrid from "./PrototypesGrid";
 import ProjectsGrid from "./ProjectsGrid";
 import DependedOnBySection from "./DependedOnBySection";
 import { FullscreenNoteWrapper } from "./FullscreenNoteWrapper";
-import { fetchColumnDefs, createColumnDef, deleteColumnDef, type ColumnDef } from "@/lib/api";
+import { fetchColumnDefs, createColumnDef, deleteColumnDef, type ColumnDef, fetchDisplayTemplates, fetchColumnTemplateAssignments, seedDisplayTemplates, createDisplayTemplate, updateDisplayTemplate, deleteDisplayTemplate, assignColumnTemplate, removeColumnTemplateAssignment, type DisplayTemplate, type ColumnTemplateAssignment } from "@/lib/api";
 import { evaluateFormula } from "@/lib/formula-eval";
 
 /** Draggable table row grip handle */
@@ -117,6 +117,62 @@ function BoolPill({ value }: { value: boolean }) {
       No
     </span>
   );
+}
+
+// ─── Template display mode helpers ──────────────────────────────────────────
+
+const TEMPLATE_PALETTE = ["#5bc0de", "#4ecb71", "#f2b661", "#e67d4a", "#e05555", "#a855f7", "#6c7bff", "#9999b3", "#ff7eb3", "#38bdf8"];
+
+function hashColor(value: string): string {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+  return TEMPLATE_PALETTE[Math.abs(hash) % TEMPLATE_PALETTE.length];
+}
+
+function resolveTemplateColor(value: string, template: DisplayTemplate): string {
+  // Priority: colorMapping override > PILL_COLORS > auto-hash
+  if (template.colorMapping[value]) return template.colorMapping[value];
+  const pill = PILL_COLORS[value];
+  if (pill) return pill.text;
+  return hashColor(value);
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+/** Render a single value using a template's display mode */
+function TemplateValue({ value, template }: { value: string; template: DisplayTemplate }) {
+  const color = resolveTemplateColor(value, template);
+  switch (template.displayMode) {
+    case "pill":
+      return (
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+          style={{ backgroundColor: hexToRgba(color, 0.15), color, border: `1px solid ${hexToRgba(color, 0.3)}` }}>
+          {value}
+        </span>
+      );
+    case "chip":
+      return (
+        <span className="px-1.5 py-0.5 rounded text-xs"
+          style={{ backgroundColor: "var(--color-surface)", border: `1px solid ${hexToRgba(color, 0.4)}`, color: "var(--color-text-muted)" }}>
+          {value}
+        </span>
+      );
+    case "tag":
+      return (
+        <span className="px-1.5 py-0.5 rounded text-[10px]"
+          style={{ backgroundColor: hexToRgba(color, 0.1), color, border: `1px solid ${hexToRgba(color, 0.2)}` }}>
+          {value}
+        </span>
+      );
+    case "text":
+    default:
+      return <span style={{ color: template.fontColor || undefined }}>{value}</span>;
+  }
 }
 
 interface SortableFeatureHeaderProps {
@@ -373,6 +429,85 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
     columnDefsLoadedRef.current = true;
   }, []);
   useEffect(() => { reloadColumnDefs(); }, [reloadColumnDefs]);
+
+  // ─── Display Templates & Assignments ───
+  const [displayTemplates, setDisplayTemplates] = useState<DisplayTemplate[]>([]);
+  const [templateAssignments, setTemplateAssignments] = useState<ColumnTemplateAssignment[]>([]);
+
+  const reloadDisplayTemplates = useCallback(async () => {
+    try {
+      const [tpls, assigns] = await Promise.all([fetchDisplayTemplates(), fetchColumnTemplateAssignments()]);
+      setDisplayTemplates(tpls);
+      setTemplateAssignments(assigns);
+    } catch { /* ignore on first load */ }
+  }, []);
+
+  // Seed templates on first load if none exist, then load them
+  useEffect(() => {
+    (async () => {
+      try {
+        const tpls = await fetchDisplayTemplates();
+        if (tpls.length === 0) {
+          // Build column mappings from TABLE_CONFIGS for seeding
+          const columns: Array<{ entityType: string; columnKey: string; columnType: string }> = [];
+          for (const [tabKey, cfg] of Object.entries(TABLE_CONFIGS)) {
+            const entityType = TAB_ENTITY_MAP[tabKey] || tabKey;
+            for (const col of cfg.columns) {
+              if (col.type === "separator" || col.hideInGrid) continue;
+              columns.push({ entityType, columnKey: col.key, columnType: col.type });
+            }
+          }
+          await seedDisplayTemplates(columns);
+          await reloadDisplayTemplates();
+        } else {
+          const assigns = await fetchColumnTemplateAssignments();
+          setDisplayTemplates(tpls);
+          setTemplateAssignments(assigns);
+        }
+      } catch { /* ignore */ }
+    })();
+  }, [reloadDisplayTemplates]);
+
+  // ─── Persistent undo history for template actions ───
+  interface TemplateUndoEntry {
+    id: string;
+    timestamp: string;
+    description: string;
+    undoPayload: { type: "assign"; entityType: string; columnKey: string; templateId: number }
+      | { type: "detach"; entityType: string; columnKey: string };
+  }
+  const [templateUndoHistory, setTemplateUndoHistory] = usePersistedPreference<TemplateUndoEntry[]>("splan_template_undo_history", []);
+  const [undoHistoryOpen, setUndoHistoryOpen] = useState(false);
+
+  const pushTemplateUndo = useCallback((description: string, undoPayload: TemplateUndoEntry["undoPayload"]) => {
+    setTemplateUndoHistory((prev) => {
+      const entry: TemplateUndoEntry = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, timestamp: new Date().toLocaleTimeString(), description, undoPayload };
+      const next = [entry, ...prev];
+      return next.slice(0, 50); // cap at 50
+    });
+  }, [setTemplateUndoHistory]);
+
+  const executeUndo = useCallback(async (entry: TemplateUndoEntry) => {
+    try {
+      if (entry.undoPayload.type === "assign") {
+        await assignColumnTemplate(entry.undoPayload.entityType, entry.undoPayload.columnKey, entry.undoPayload.templateId);
+      } else {
+        await removeColumnTemplateAssignment(entry.undoPayload.entityType, entry.undoPayload.columnKey);
+      }
+      await reloadDisplayTemplates();
+      setTemplateUndoHistory((prev) => prev.filter((e) => e.id !== entry.id));
+    } catch {
+      window.alert("Undo failed — the template may have been deleted.");
+      setTemplateUndoHistory((prev) => prev.filter((e) => e.id !== entry.id));
+    }
+  }, [reloadDisplayTemplates, setTemplateUndoHistory]);
+
+  // Lookup: get template for a given entity+column
+  const getColumnTemplate = useCallback((entityType: string, columnKey: string): DisplayTemplate | null => {
+    const assignment = templateAssignments.find((a) => a.entityType === entityType && a.columnKey === columnKey);
+    if (!assignment) return null;
+    return displayTemplates.find((t) => t.id === assignment.templateId) || null;
+  }, [displayTemplates, templateAssignments]);
 
   const [data, setData] = useState<Record<string, Record<string, unknown>[]>>({});
   const [loadedTabs, setLoadedTabs] = useState<Set<string>>(new Set());
@@ -2367,6 +2502,37 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
         return <span style={{ color: "var(--color-text-muted)" }}>—</span>;
       }
 
+      // ─── Template-aware rendering ───
+      const entityType = TAB_ENTITY_MAP[subTab] || subTab;
+      const tpl = getColumnTemplate(entityType, col.key);
+      if (tpl) {
+        // Array values (multi-fk, tags, etc.) — render each item with the template
+        if (Array.isArray(value)) {
+          if (value.length === 0) return <span style={{ color: "var(--color-text-muted)" }}>—</span>;
+          const items = (value as unknown[]).map((v) => {
+            if (col.type === "multi-fk" && col.fkTable && typeof v === "number") return resolveFK(col.fkTable, v);
+            if (typeof v === "object" && v && "name" in (v as Record<string, unknown>)) return (v as { name: string }).name;
+            return String(v);
+          });
+          return (
+            <span className="flex flex-wrap gap-1">
+              {items.map((item, i) => <TemplateValue key={i} value={item} template={tpl} />)}
+            </span>
+          );
+        }
+        // Boolean values
+        if (col.type === "boolean") {
+          return <TemplateValue value={value ? "Yes" : "No"} template={tpl} />;
+        }
+        // FK values — resolve name first
+        if (col.type === "fk" && col.fkTable) {
+          return <TemplateValue value={resolveFK(col.fkTable, value)} template={tpl} />;
+        }
+        // Single value
+        return <TemplateValue value={String(value)} template={tpl} />;
+      }
+
+      // ─── Default type-based rendering (no template assigned) ───
       switch (col.type) {
         case "boolean":
           return <BoolPill value={!!value} />;
@@ -2514,7 +2680,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
         }
       }
     },
-    [resolveFK, resolveTableName, resolveFieldName, fieldTableIdLookup]
+    [resolveFK, resolveTableName, resolveFieldName, fieldTableIdLookup, subTab, getColumnTemplate]
   );
 
   /* ───── Inline edit helpers (all CRUD tabs) ───── */
@@ -4460,19 +4626,24 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                       {hoveredMainColKey === col.key && colsWithTooltips.length > 0 && !colDisplayPopover && (
                         <div
                           className="absolute z-40 mt-1 rounded-md border shadow-lg py-1.5 px-1"
-                          style={{ backgroundColor: "var(--color-background)", borderColor: "var(--color-divider)", left: 0, top: "100%", minWidth: 320, pointerEvents: "none" }}
+                          style={{ backgroundColor: "var(--color-background)", borderColor: "var(--color-divider)", left: 0, top: "100%", minWidth: 420, pointerEvents: "none" }}
                         >
                           <div className="text-[9px] font-semibold uppercase tracking-wide px-2 pb-1 mb-1 border-b" style={{ color: "var(--color-text-muted)", borderColor: "var(--color-divider)" }}>{cfg.label} Columns</div>
-                          {colsWithTooltips.map((c) => (
-                            <div
-                              key={c.key}
-                              className="flex gap-2 px-2 py-0.5 rounded text-[10px]"
-                              style={{ backgroundColor: c.key === col.key ? "var(--color-surface)" : "transparent" }}
-                            >
-                              <span className="font-semibold shrink-0 w-[100px]" style={{ color: c.key === col.key ? "var(--color-text)" : "var(--color-text-muted)" }}>{c.label}</span>
-                              <span style={{ color: c.key === col.key ? "var(--color-text)" : "var(--color-text-muted)", opacity: c.key === col.key ? 1 : 0.7 }}>{c.tooltip}</span>
-                            </div>
-                          ))}
+                          {colsWithTooltips.map((c) => {
+                            const tplForTip = getColumnTemplate(TAB_ENTITY_MAP[subTab] || subTab, c.key);
+                            const tplName = tplForTip?.templateName;
+                            return (
+                              <div
+                                key={c.key}
+                                className="flex gap-2 px-2 py-0.5 rounded text-[10px]"
+                                style={{ backgroundColor: c.key === col.key ? "var(--color-surface)" : "transparent" }}
+                              >
+                                <span className="font-semibold shrink-0 w-[100px]" style={{ color: c.key === col.key ? "var(--color-text)" : "var(--color-text-muted)" }}>{c.label}</span>
+                                <span className="flex-1" style={{ color: c.key === col.key ? "var(--color-text)" : "var(--color-text-muted)", opacity: c.key === col.key ? 1 : 0.7 }}>{c.tooltip}</span>
+                                <span className="shrink-0 text-[9px] truncate max-w-[80px]" style={{ color: tplName ? "#5bc0de" : "var(--color-text-muted)", opacity: tplName ? 0.8 : 0.4 }}>{tplName || "Default"}</span>
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                       {/* Resize handle */}
@@ -4706,12 +4877,20 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                         }
                         const col = item.col;
                         const cdCfg = getColDisplay(subTab, col.key);
-                        const isMultiLine = cdCfg.wrap && (cdCfg.lines ?? 1) > 1;
-                        const lineCount = cdCfg.lines ?? 1;
+                        // Merge template settings (base) with localStorage overrides (top)
+                        const tplForCell = getColumnTemplate(TAB_ENTITY_MAP[subTab] || subTab, col.key);
+                        const mergedFontSize = cdCfg.fontSize ?? tplForCell?.fontSize ?? undefined;
+                        const mergedFontColor = cdCfg.fontColor ?? tplForCell?.fontColor ?? undefined;
+                        const mergedFontBold = cdCfg.fontBold ?? tplForCell?.fontBold ?? undefined;
+                        const mergedFontUnderline = cdCfg.fontUnderline ?? tplForCell?.fontUnderline ?? undefined;
+                        const mergedWrap = cdCfg.wrap ?? tplForCell?.wrap ?? false;
+                        const mergedLines = cdCfg.lines ?? tplForCell?.lines ?? 1;
+                        const isMultiLine = mergedWrap && mergedLines > 1;
+                        const lineCount = mergedLines;
                         const isEditingThis = editingCell?.rowId === rowId && editingCell?.colKey === col.key;
                         const forceExpand = isDataTables && isExpanded && col.key === "descriptionPurpose";
                         return (
-                        <td key={col.key} className={`py-2 ${isDataTables && col.key === "tableName" ? "pl-1 pr-3" : "px-3"} ${forceExpand ? "" : "max-w-[250px] overflow-hidden"}`} style={{ color: cdCfg.fontColor || "var(--color-text)", fontSize: cdCfg.fontSize ? `${cdCfg.fontSize}px` : undefined, fontWeight: cdCfg.fontBold ? "bold" : undefined, textDecoration: cdCfg.fontUnderline ? "underline" : undefined, ...(forceExpand ? { whiteSpace: "normal", wordBreak: "break-word", overflow: "visible", textOverflow: "clip", maxWidth: 375 } : isMultiLine && !isEditingThis ? { whiteSpace: "normal", wordBreak: "break-word", maxHeight: `${lineCount * 1.35}em`, overflow: "hidden" } : !isEditingThis ? { whiteSpace: "nowrap", textOverflow: "ellipsis" } : {}) }}>
+                        <td key={col.key} className={`py-2 ${isDataTables && col.key === "tableName" ? "pl-1 pr-3" : "px-3"} ${forceExpand ? "" : "max-w-[250px] overflow-hidden"}`} style={{ color: mergedFontColor || "var(--color-text)", fontSize: mergedFontSize ? `${mergedFontSize}px` : undefined, fontWeight: mergedFontBold ? "bold" : undefined, textDecoration: mergedFontUnderline ? "underline" : undefined, textAlign: tplForCell?.alignment || undefined, ...(forceExpand ? { whiteSpace: "normal", wordBreak: "break-word", overflow: "visible", textOverflow: "clip", maxWidth: 375 } : isMultiLine && !isEditingThis ? { whiteSpace: "normal", wordBreak: "break-word", maxHeight: `${lineCount * 1.35}em`, overflow: "hidden" } : !isEditingThis ? { whiteSpace: "nowrap", textOverflow: "ellipsis" } : {}) }}>
                           {col.type === "ref-features" ? (
                             (() => {
                               const id = row[cfg.idKey] as number;
@@ -5757,15 +5936,63 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
           const currentLines = cfg2.lines ?? 1;
           const isWrap = cfg2.wrap ?? false;
 
+          // Template state for this column
+          const entityType = TAB_ENTITY_MAP[subTab] || subTab;
+          const currentTpl = getColumnTemplate(entityType, colKey);
+          const currentTplId = currentTpl?.id ?? 0;
+
+          // Incompatibility warnings
+          const incompatWarnings: Record<string, Record<string, string>> = {
+            textarea: { pill: "Long text may not display well as pills — content will be truncated", chip: "Long text may not display well as chips — content will be truncated", tag: "Long text may not display well as tags — content will be truncated" },
+            "image-carousel": { pill: "Image columns show count badges — pill mode may look unexpected", chip: "Image columns show count badges — chip mode may look unexpected", tag: "Image columns show count badges — tag mode may look unexpected" },
+            "module-rules": { pill: "Rule columns have complex rendering — template may not apply fully", chip: "Rule columns have complex rendering — template may not apply fully", tag: "Rule columns have complex rendering — template may not apply fully" },
+          };
+          const warning = currentTpl ? incompatWarnings[colDef.type]?.[currentTpl.displayMode] : null;
+
+          // Connector line + offset positioning
+          const headerCenterX = colDisplayPopover.rect.left + colDisplayPopover.rect.width / 2;
+          const headerBottom = colDisplayPopover.rect.bottom;
+          const vertDrop = 20;
+          const horizOffset = 150;
+          // Determine if this column is in the last 4 visible columns → go left
+          const colIdx = gridCols?.findIndex((c) => c.key === colKey) ?? -1;
+          const goLeft = colIdx >= 0 && gridCols && colIdx >= gridCols.length - 4;
+          const popoverWidth = 250;
+          let popoverLeft = goLeft
+            ? headerCenterX - horizOffset - popoverWidth
+            : headerCenterX + horizOffset;
+          // Clamp to viewport
+          popoverLeft = Math.max(8, Math.min(popoverLeft, window.innerWidth - popoverWidth - 8));
+          const popoverTop = headerBottom + vertDrop;
+          // Connector line endpoints
+          const lineStartX = headerCenterX;
+          const lineStartY = headerBottom;
+          const lineEndX = goLeft ? popoverLeft + popoverWidth : popoverLeft;
+          const lineEndY = popoverTop;
+
           return (
+            <>
+            {/* Connector line */}
+            <svg className="fixed z-50 pointer-events-none" style={{ top: 0, left: 0, width: "100vw", height: "100vh", overflow: "visible" }}>
+              <polyline
+                points={`${lineStartX},${lineStartY} ${lineStartX},${lineStartY + vertDrop} ${lineEndX},${lineEndY}`}
+                fill="none"
+                stroke="rgba(91,192,222,0.5)"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+              <circle cx={lineStartX} cy={lineStartY} r="2.5" fill="#5bc0de" opacity="0.7" />
+            </svg>
             <div
               id="col-display-popover"
-              className="fixed z-50 rounded-lg border shadow-xl w-[220px]"
+              className="fixed z-50 rounded-lg border shadow-xl w-[250px]"
               style={{
                 backgroundColor: "var(--color-background)",
                 borderColor: "var(--color-divider)",
-                top: colDisplayPopover.rect.bottom + 4,
-                left: Math.min(colDisplayPopover.rect.left, window.innerWidth - 230),
+                top: popoverTop,
+                left: popoverLeft,
+                maxHeight: "calc(100vh - 100px)",
+                overflowY: "auto",
               }}
             >
               <div className="flex items-center justify-between px-3 py-2 border-b" style={{ borderColor: "var(--color-divider)" }}>
@@ -5775,142 +6002,402 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                 </div>
                 <button onClick={() => setColDisplayPopover(null)} className="text-[10px] px-1 rounded hover:bg-black/10" style={{ color: "var(--color-text-muted)" }}>✕</button>
               </div>
-              <div className="p-3 space-y-2">
-                {(() => {
-                  const specialTypes = new Set(["enum", "boolean", "platforms", "module-rules", "ref-features", "checklist", "module-tags", "multi-fk"]);
-                  const isSpecial = specialTypes.has(colDef.type);
-                  if (isSpecial) {
-                    return <div className="text-[10px] py-2 text-center" style={{ color: "var(--color-text-muted)" }}>Special column — font styling not available</div>;
+              <div className="p-3 space-y-3">
+                {/* ─── Template selector ─── */}
+                <div>
+                  <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Template</div>
+                  <select
+                    className="w-full text-[11px] px-2 py-1 rounded border"
+                    style={{ backgroundColor: "var(--color-surface)", borderColor: "var(--color-divider)", color: "var(--color-text)" }}
+                    value={currentTplId}
+                    onChange={async (e) => {
+                      const newId = Number(e.target.value);
+                      const prevTplId = currentTplId;
+                      if (newId === 0) {
+                        await removeColumnTemplateAssignment(entityType, colKey);
+                        if (prevTplId) pushTemplateUndo(`Detached template from ${colDef.label}`, { type: "assign", entityType, columnKey: colKey, templateId: prevTplId });
+                      } else {
+                        await assignColumnTemplate(entityType, colKey, newId);
+                        const newTpl = displayTemplates.find((t) => t.id === newId);
+                        if (prevTplId) {
+                          pushTemplateUndo(`Applied "${newTpl?.templateName}" to ${colDef.label}`, { type: "assign", entityType, columnKey: colKey, templateId: prevTplId });
+                        } else {
+                          pushTemplateUndo(`Applied "${newTpl?.templateName}" to ${colDef.label}`, { type: "detach", entityType, columnKey: colKey });
+                        }
+                      }
+                      await reloadDisplayTemplates();
+                    }}
+                  >
+                    <option value={0}>— None (Default) —</option>
+                    {displayTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.templateName}</option>
+                    ))}
+                  </select>
+                  {currentTpl && (
+                    <div className="flex gap-1 mt-1">
+                      <button
+                        onClick={async () => {
+                          const prevTplId = currentTpl.id;
+                          const prevTplName = currentTpl.templateName;
+                          await removeColumnTemplateAssignment(entityType, colKey);
+                          await reloadDisplayTemplates();
+                          pushTemplateUndo(`Detached "${prevTplName}" from ${colDef.label}`, { type: "assign", entityType, columnKey: colKey, templateId: prevTplId });
+                        }}
+                        className="text-[9px] px-1.5 py-0.5 rounded transition-colors hover:bg-red-500/10"
+                        style={{ color: "#e05555", border: "1px solid rgba(224,85,85,0.3)" }}
+                      >Detach</button>
+                    </div>
+                  )}
+                </div>
+
+                {/* ─── Display Mode buttons ─── */}
+                <div>
+                  <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Display Mode</div>
+                  <div className="flex gap-1">
+                    {(["text", "pill", "chip", "tag"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        onClick={async () => {
+                          if (currentTpl) {
+                            // Check how many columns use this template
+                            const usageCount = templateAssignments.filter((a) => a.templateId === currentTpl.id).length;
+                            if (usageCount > 1 && !window.confirm(`This template is used by ${usageCount} columns — changes will apply to all. Continue?`)) return;
+                            await updateDisplayTemplate(currentTpl.id, { displayMode: mode });
+                            await reloadDisplayTemplates();
+                          }
+                        }}
+                        className="px-2 py-0.5 text-[10px] rounded transition-colors"
+                        style={{
+                          backgroundColor: currentTpl?.displayMode === mode ? "var(--color-primary)" : "var(--color-surface)",
+                          color: currentTpl?.displayMode === mode ? "var(--color-primary-text)" : "var(--color-text-muted)",
+                          border: "1px solid var(--color-divider)",
+                          opacity: currentTpl ? 1 : 0.5,
+                        }}
+                        disabled={!currentTpl}
+                        title={currentTpl ? `Switch to ${mode} mode` : "Assign a template first"}
+                      >{mode.charAt(0).toUpperCase() + mode.slice(1)}</button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ─── Incompatibility warning ─── */}
+                {warning && (
+                  <div className="text-[9px] px-2 py-1 rounded" style={{ backgroundColor: "rgba(242,182,97,0.12)", color: "#f2b661", border: "1px solid rgba(242,182,97,0.3)" }}>
+                    {warning}
+                  </div>
+                )}
+
+                {/* ─── Alignment ─── */}
+                {currentTpl && (
+                  <div>
+                    <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Alignment</div>
+                    <div className="flex gap-1">
+                      {(["left", "center", "right"] as const).map((align) => (
+                        <button
+                          key={align}
+                          onClick={async () => {
+                            const usageCount = templateAssignments.filter((a) => a.templateId === currentTpl.id).length;
+                            if (usageCount > 1 && !window.confirm(`This template is used by ${usageCount} columns — changes will apply to all. Continue?`)) return;
+                            await updateDisplayTemplate(currentTpl.id, { alignment: align });
+                            await reloadDisplayTemplates();
+                          }}
+                          className="px-2 py-0.5 text-[10px] rounded transition-colors"
+                          style={{
+                            backgroundColor: currentTpl.alignment === align ? "var(--color-primary)" : "var(--color-surface)",
+                            color: currentTpl.alignment === align ? "var(--color-primary-text)" : "var(--color-text-muted)",
+                            border: "1px solid var(--color-divider)",
+                          }}
+                        >{align.charAt(0).toUpperCase() + align.slice(1)}</button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ─── Text wrapping controls ─── */}
+                {isTextCol && (
+                  <>
+                    <div>
+                      <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Display</div>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => updateColDisplay(subTab, colKey, { wrap: false, lines: 1 })}
+                          className="px-2 py-0.5 text-[10px] rounded transition-colors"
+                          style={{
+                            backgroundColor: !isWrap ? "var(--color-primary)" : "var(--color-surface)",
+                            color: !isWrap ? "var(--color-primary-text)" : "var(--color-text-muted)",
+                            border: "1px solid var(--color-divider)",
+                          }}
+                        >Single line</button>
+                        <button
+                          onClick={() => updateColDisplay(subTab, colKey, { wrap: true, lines: currentLines < 2 ? 2 : currentLines })}
+                          className="px-2 py-0.5 text-[10px] rounded transition-colors"
+                          style={{
+                            backgroundColor: isWrap ? "var(--color-primary)" : "var(--color-surface)",
+                            color: isWrap ? "var(--color-primary-text)" : "var(--color-text-muted)",
+                            border: "1px solid var(--color-divider)",
+                          }}
+                        >Multi-line</button>
+                      </div>
+                    </div>
+                    {isWrap && (
+                      <div>
+                        <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Lines: {currentLines}</div>
+                        <div className="flex items-center gap-2">
+                          <input type="range" min={1} max={5} value={currentLines}
+                            onChange={(e) => updateColDisplay(subTab, colKey, { lines: Number(e.target.value) })}
+                            className="flex-1" style={{ accentColor: "var(--color-primary)" }} />
+                          <span className="text-[10px] w-4 text-center" style={{ color: "var(--color-text)" }}>{currentLines}</span>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+                {/* ─── Font size ─── */}
+                <div>
+                  <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Font Size: {cfg2.fontSize ?? currentTpl?.fontSize ?? 12}px</div>
+                  <div className="flex items-center gap-2">
+                    <input type="range" min={9} max={24} value={cfg2.fontSize ?? currentTpl?.fontSize ?? 12}
+                      onChange={(e) => updateColDisplay(subTab, colKey, { fontSize: Number(e.target.value) })}
+                      className="flex-1" style={{ accentColor: "var(--color-primary)" }} />
+                    <span className="text-[10px] w-6 text-center" style={{ color: "var(--color-text)" }}>{cfg2.fontSize ?? currentTpl?.fontSize ?? 12}</span>
+                  </div>
+                </div>
+                {/* ─── Bold & Underline ─── */}
+                <div>
+                  <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Style</div>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => updateColDisplay(subTab, colKey, { fontBold: !cfg2.fontBold })}
+                      className="w-7 h-7 rounded text-[13px] font-bold transition-colors"
+                      style={{
+                        backgroundColor: cfg2.fontBold ? "var(--color-primary)" : "var(--color-surface)",
+                        color: cfg2.fontBold ? "var(--color-primary-text)" : "var(--color-text-muted)",
+                        border: "1px solid var(--color-divider)",
+                      }}
+                      title="Bold"
+                    >B</button>
+                    <button
+                      onClick={() => updateColDisplay(subTab, colKey, { fontUnderline: !cfg2.fontUnderline })}
+                      className="w-7 h-7 rounded text-[13px] transition-colors"
+                      style={{
+                        backgroundColor: cfg2.fontUnderline ? "var(--color-primary)" : "var(--color-surface)",
+                        color: cfg2.fontUnderline ? "var(--color-primary-text)" : "var(--color-text-muted)",
+                        border: "1px solid var(--color-divider)",
+                        textDecoration: "underline",
+                      }}
+                      title="Underline"
+                    >U</button>
+                  </div>
+                </div>
+                {/* ─── Font color swatches ─── */}
+                <div>
+                  <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Font Color</div>
+                  <div className="flex gap-1 flex-wrap">
+                    {[
+                      { color: undefined, label: "Default" },
+                      { color: "#ffffff", label: "White" },
+                      { color: "#9999b3", label: "Muted" },
+                      { color: "#5bc0de", label: "Cyan" },
+                      { color: "#4ecb71", label: "Green" },
+                      { color: "#f2b661", label: "Gold" },
+                      { color: "#e67d4a", label: "Orange" },
+                      { color: "#e05555", label: "Red" },
+                      { color: "#a855f7", label: "Purple" },
+                      { color: "#6c7bff", label: "Blue" },
+                    ].map((s) => (
+                      <button
+                        key={s.label}
+                        onClick={() => updateColDisplay(subTab, colKey, { fontColor: s.color })}
+                        className="w-5 h-5 rounded-full border-2 transition-transform hover:scale-110"
+                        style={{
+                          backgroundColor: s.color || "var(--color-text)",
+                          borderColor: (cfg2.fontColor ?? undefined) === s.color ? "var(--color-primary)" : "transparent",
+                          boxShadow: (cfg2.fontColor ?? undefined) === s.color ? "0 0 0 1px var(--color-primary)" : undefined,
+                        }}
+                        title={s.label}
+                      />
+                    ))}
+                  </div>
+                </div>
+                {/* ─── Save / Update actions ─── */}
+                <div className="border-t pt-2 space-y-1" style={{ borderColor: "var(--color-divider)" }}>
+                  <button
+                    onClick={async () => {
+                      const name = window.prompt("Template name:");
+                      if (!name?.trim()) return;
+                      try {
+                        const tpl = await createDisplayTemplate({
+                          templateName: name.trim(),
+                          displayMode: currentTpl?.displayMode || "text",
+                          fontSize: cfg2.fontSize ?? currentTpl?.fontSize ?? 12,
+                          fontBold: cfg2.fontBold ?? currentTpl?.fontBold ?? false,
+                          fontUnderline: cfg2.fontUnderline ?? currentTpl?.fontUnderline ?? false,
+                          fontColor: cfg2.fontColor ?? currentTpl?.fontColor ?? null,
+                          alignment: currentTpl?.alignment || "left",
+                          wrap: cfg2.wrap ?? currentTpl?.wrap ?? false,
+                          lines: cfg2.lines ?? currentTpl?.lines ?? 1,
+                          colorMapping: currentTpl?.colorMapping || {},
+                        });
+                        await assignColumnTemplate(entityType, colKey, tpl.id);
+                        await reloadDisplayTemplates();
+                      } catch (err: unknown) {
+                        window.alert(err instanceof Error ? err.message : "Failed to create template");
+                      }
+                    }}
+                    className="w-full text-[10px] px-2 py-1 rounded transition-colors hover:bg-white/5"
+                    style={{ color: "#5bc0de", border: "1px solid rgba(91,192,222,0.3)" }}
+                  >Save as New Template</button>
+                  {currentTpl && (
+                    <button
+                      onClick={async () => {
+                        const usageCount = templateAssignments.filter((a) => a.templateId === currentTpl.id).length;
+                        if (usageCount > 1 && !window.confirm(`This will update "${currentTpl.templateName}" across ${usageCount} columns. Continue?`)) return;
+                        await updateDisplayTemplate(currentTpl.id, {
+                          fontSize: cfg2.fontSize ?? currentTpl.fontSize,
+                          fontBold: cfg2.fontBold ?? currentTpl.fontBold,
+                          fontUnderline: cfg2.fontUnderline ?? currentTpl.fontUnderline,
+                          fontColor: cfg2.fontColor ?? currentTpl.fontColor,
+                          wrap: cfg2.wrap ?? currentTpl.wrap,
+                          lines: cfg2.lines ?? currentTpl.lines,
+                        });
+                        await reloadDisplayTemplates();
+                      }}
+                      className="w-full text-[10px] px-2 py-1 rounded transition-colors hover:bg-white/5"
+                      style={{ color: "#4ecb71", border: "1px solid rgba(78,203,113,0.3)" }}
+                    >Update "{currentTpl.templateName}"</button>
+                  )}
+                </div>
+
+                {/* ─── Value color overrides (pill/chip/tag modes) ─── */}
+                {currentTpl && (currentTpl.displayMode === "pill" || currentTpl.displayMode === "chip" || currentTpl.displayMode === "tag") && (() => {
+                  // Collect distinct values for this column from the current data
+                  const rows = (data[subTab] || []) as Record<string, unknown>[];
+                  const valSet = new Set<string>();
+                  for (const row of rows) {
+                    const v = row[colKey];
+                    if (v == null || v === "") continue;
+                    if (Array.isArray(v)) {
+                      for (const item of v) {
+                        if (item != null) valSet.add(String(typeof item === "object" && "name" in (item as Record<string, unknown>) ? (item as { name: string }).name : item));
+                      }
+                    } else {
+                      valSet.add(String(v));
+                    }
                   }
+                  const values = Array.from(valSet).sort();
+                  if (values.length === 0) return null;
                   return (
-                    <>
-                      {/* Text display controls */}
-                      {isTextCol && (
-                        <>
-                          <div>
-                            <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Display</div>
-                            <div className="flex gap-1">
-                              <button
-                                onClick={() => updateColDisplay(subTab, colKey, { wrap: false, lines: 1 })}
-                                className="px-2 py-0.5 text-[10px] rounded transition-colors"
-                                style={{
-                                  backgroundColor: !isWrap ? "var(--color-primary)" : "var(--color-surface)",
-                                  color: !isWrap ? "var(--color-primary-text)" : "var(--color-text-muted)",
-                                  border: "1px solid var(--color-divider)",
-                                }}
-                              >
-                                Single line
-                              </button>
-                              <button
-                                onClick={() => updateColDisplay(subTab, colKey, { wrap: true, lines: currentLines < 2 ? 2 : currentLines })}
-                                className="px-2 py-0.5 text-[10px] rounded transition-colors"
-                                style={{
-                                  backgroundColor: isWrap ? "var(--color-primary)" : "var(--color-surface)",
-                                  color: isWrap ? "var(--color-primary-text)" : "var(--color-text-muted)",
-                                  border: "1px solid var(--color-divider)",
-                                }}
-                              >
-                                Multi-line
-                              </button>
-                            </div>
-                          </div>
-                          {isWrap && (
-                            <div>
-                              <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Lines: {currentLines}</div>
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="range"
-                                  min={1}
-                                  max={5}
-                                  value={currentLines}
-                                  onChange={(e) => updateColDisplay(subTab, colKey, { lines: Number(e.target.value) })}
-                                  className="flex-1"
-                                  style={{ accentColor: "var(--color-primary)" }}
-                                />
-                                <span className="text-[10px] w-4 text-center" style={{ color: "var(--color-text)" }}>{currentLines}</span>
+                    <div className="border-t pt-2" style={{ borderColor: "var(--color-divider)" }}>
+                      <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Value Colors</div>
+                      <div className="space-y-1 max-h-[120px] overflow-y-auto">
+                        {values.map((val) => {
+                          const autoColor = resolveTemplateColor(val, currentTpl);
+                          const hasOverride = !!currentTpl.colorMapping[val];
+                          return (
+                            <div key={val} className="flex items-center gap-2 text-[10px]">
+                              <span className="flex-1 truncate" style={{ color: "var(--color-text)" }}>{val}</span>
+                              <div className="flex gap-0.5">
+                                {TEMPLATE_PALETTE.map((c) => (
+                                  <button
+                                    key={c}
+                                    onClick={async () => {
+                                      const newMapping = { ...currentTpl.colorMapping, [val]: c };
+                                      await updateDisplayTemplate(currentTpl.id, { colorMapping: newMapping });
+                                      await reloadDisplayTemplates();
+                                    }}
+                                    className="w-3.5 h-3.5 rounded-full border transition-transform hover:scale-125"
+                                    style={{
+                                      backgroundColor: c,
+                                      borderColor: autoColor === c ? "white" : "transparent",
+                                      boxShadow: autoColor === c ? "0 0 0 1px " + c : undefined,
+                                    }}
+                                  />
+                                ))}
+                                {hasOverride && (
+                                  <button
+                                    onClick={async () => {
+                                      const newMapping = { ...currentTpl.colorMapping };
+                                      delete newMapping[val];
+                                      await updateDisplayTemplate(currentTpl.id, { colorMapping: newMapping });
+                                      await reloadDisplayTemplates();
+                                    }}
+                                    className="text-[8px] px-1 rounded hover:bg-red-500/10"
+                                    style={{ color: "#e05555" }}
+                                    title="Reset to auto"
+                                  >x</button>
+                                )}
                               </div>
                             </div>
-                          )}
-                        </>
-                      )}
-                      {/* Font size */}
-                      <div>
-                        <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Font Size: {cfg2.fontSize ?? 12}px</div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="range"
-                            min={9}
-                            max={24}
-                            value={cfg2.fontSize ?? 12}
-                            onChange={(e) => updateColDisplay(subTab, colKey, { fontSize: Number(e.target.value) })}
-                            className="flex-1"
-                            style={{ accentColor: "var(--color-primary)" }}
-                          />
-                          <span className="text-[10px] w-6 text-center" style={{ color: "var(--color-text)" }}>{cfg2.fontSize ?? 12}</span>
-                        </div>
+                          );
+                        })}
                       </div>
-                      {/* Bold & Underline toggles */}
-                      <div>
-                        <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Style</div>
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => updateColDisplay(subTab, colKey, { fontBold: !cfg2.fontBold })}
-                            className="w-7 h-7 rounded text-[13px] font-bold transition-colors"
-                            style={{
-                              backgroundColor: cfg2.fontBold ? "var(--color-primary)" : "var(--color-surface)",
-                              color: cfg2.fontBold ? "var(--color-primary-text)" : "var(--color-text-muted)",
-                              border: "1px solid var(--color-divider)",
-                            }}
-                            title="Bold"
-                          >B</button>
-                          <button
-                            onClick={() => updateColDisplay(subTab, colKey, { fontUnderline: !cfg2.fontUnderline })}
-                            className="w-7 h-7 rounded text-[13px] transition-colors"
-                            style={{
-                              backgroundColor: cfg2.fontUnderline ? "var(--color-primary)" : "var(--color-surface)",
-                              color: cfg2.fontUnderline ? "var(--color-primary-text)" : "var(--color-text-muted)",
-                              border: "1px solid var(--color-divider)",
-                              textDecoration: "underline",
-                            }}
-                            title="Underline"
-                          >U</button>
-                        </div>
-                      </div>
-                      {/* Font color — preset swatches */}
-                      <div>
-                        <div className="text-[10px] font-medium mb-1" style={{ color: "var(--color-text-muted)" }}>Font Color</div>
-                        <div className="flex gap-1 flex-wrap">
-                          {[
-                            { color: undefined, label: "Default" },
-                            { color: "#ffffff", label: "White" },
-                            { color: "#9999b3", label: "Muted" },
-                            { color: "#5bc0de", label: "Cyan" },
-                            { color: "#4ecb71", label: "Green" },
-                            { color: "#f2b661", label: "Gold" },
-                            { color: "#e67d4a", label: "Orange" },
-                            { color: "#e05555", label: "Red" },
-                            { color: "#a855f7", label: "Purple" },
-                            { color: "#6c7bff", label: "Blue" },
-                          ].map((s) => (
-                            <button
-                              key={s.label}
-                              onClick={() => updateColDisplay(subTab, colKey, { fontColor: s.color })}
-                              className="w-5 h-5 rounded-full border-2 transition-transform hover:scale-110"
-                              style={{
-                                backgroundColor: s.color || "var(--color-text)",
-                                borderColor: (cfg2.fontColor ?? undefined) === s.color ? "var(--color-primary)" : "transparent",
-                                boxShadow: (cfg2.fontColor ?? undefined) === s.color ? "0 0 0 1px var(--color-primary)" : undefined,
-                              }}
-                              title={s.label}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    </>
+                    </div>
                   );
                 })()}
+
+                {/* ─── Manage Templates section ─── */}
+                <details className="border-t pt-1" style={{ borderColor: "var(--color-divider)" }}>
+                  <summary className="text-[10px] cursor-pointer py-1" style={{ color: "#5bc0de" }}>Manage Templates</summary>
+                  <div className="space-y-1.5 mt-1 max-h-[200px] overflow-y-auto">
+                    {displayTemplates.map((t) => {
+                      const usageCount = templateAssignments.filter((a) => a.templateId === t.id).length;
+                      return (
+                        <div key={t.id} className="flex items-center gap-1 text-[10px] px-1 py-0.5 rounded" style={{ backgroundColor: currentTplId === t.id ? "var(--color-surface)" : "transparent" }}>
+                          <span className="flex-1 truncate font-medium" style={{ color: currentTplId === t.id ? "#5bc0de" : "var(--color-text)" }}>{t.templateName}</span>
+                          <span className="shrink-0 text-[9px]" style={{ color: "var(--color-text-muted)" }}>{usageCount} col{usageCount !== 1 ? "s" : ""}</span>
+                          <button
+                            onClick={async () => {
+                              const name = window.prompt("Rename template:", t.templateName);
+                              if (!name?.trim() || name.trim() === t.templateName) return;
+                              try {
+                                await updateDisplayTemplate(t.id, { templateName: name.trim() });
+                                await reloadDisplayTemplates();
+                              } catch (err: unknown) { window.alert(err instanceof Error ? err.message : "Rename failed"); }
+                            }}
+                            className="text-[9px] px-1 rounded hover:bg-white/10"
+                            style={{ color: "var(--color-text-muted)" }}
+                            title="Rename"
+                          >Rn</button>
+                          <button
+                            onClick={async () => {
+                              try {
+                                await createDisplayTemplate({
+                                  templateName: t.templateName + " (copy)",
+                                  displayMode: t.displayMode,
+                                  fontSize: t.fontSize,
+                                  fontBold: t.fontBold,
+                                  fontUnderline: t.fontUnderline,
+                                  fontColor: t.fontColor,
+                                  alignment: t.alignment,
+                                  wrap: t.wrap,
+                                  lines: t.lines,
+                                  colorMapping: t.colorMapping,
+                                });
+                                await reloadDisplayTemplates();
+                              } catch (err: unknown) { window.alert(err instanceof Error ? err.message : "Duplicate failed"); }
+                            }}
+                            className="text-[9px] px-1 rounded hover:bg-white/10"
+                            style={{ color: "var(--color-text-muted)" }}
+                            title="Duplicate"
+                          >Dp</button>
+                          <button
+                            onClick={async () => {
+                              if (usageCount > 0 && !window.confirm(`Delete "${t.templateName}"? ${usageCount} column${usageCount !== 1 ? "s" : ""} will revert to default.`)) return;
+                              await deleteDisplayTemplate(t.id);
+                              await reloadDisplayTemplates();
+                            }}
+                            className="text-[9px] px-1 rounded hover:bg-red-500/10"
+                            style={{ color: "#e05555" }}
+                            title="Delete"
+                          >x</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </details>
               </div>
             </div>
+            </>
           );
         })()}
 
@@ -6914,6 +7401,48 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
           </div>
         );
       })()}
+
+      {/* ─── Persistent template undo bar ─── */}
+      {templateUndoHistory.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] rounded-lg border shadow-xl"
+          style={{ backgroundColor: "var(--color-background)", borderColor: "var(--color-divider)", minWidth: 320, maxWidth: 500 }}>
+          <div className="flex items-center gap-3 px-4 py-2">
+            <span className="text-[11px] flex-1 truncate" style={{ color: "var(--color-text)" }}>{templateUndoHistory[0].description}</span>
+            <button
+              onClick={() => executeUndo(templateUndoHistory[0])}
+              className="text-[11px] font-semibold px-2 py-0.5 rounded transition-colors hover:bg-white/10 shrink-0"
+              style={{ color: "#5bc0de", border: "1px solid rgba(91,192,222,0.3)" }}
+            >Undo{templateUndoHistory.length > 1 ? ` (${templateUndoHistory.length})` : ""}</button>
+            <button
+              onClick={() => setUndoHistoryOpen((p) => !p)}
+              className="text-[10px] px-1 rounded hover:bg-white/10 shrink-0"
+              style={{ color: "var(--color-text-muted)" }}
+              title="Show undo history"
+            >{undoHistoryOpen ? "▼" : "▲"}</button>
+            <button
+              onClick={() => setTemplateUndoHistory([])}
+              className="text-[10px] px-1 rounded hover:bg-black/10 shrink-0"
+              style={{ color: "var(--color-text-muted)" }}
+              title="Clear all undo history"
+            >✕</button>
+          </div>
+          {undoHistoryOpen && (
+            <div className="border-t px-2 py-1 max-h-[200px] overflow-y-auto" style={{ borderColor: "var(--color-divider)" }}>
+              {templateUndoHistory.map((entry) => (
+                <div key={entry.id} className="flex items-center gap-2 py-1 text-[10px]">
+                  <span className="shrink-0" style={{ color: "var(--color-text-muted)" }}>{entry.timestamp}</span>
+                  <span className="flex-1 truncate" style={{ color: "var(--color-text)" }}>{entry.description}</span>
+                  <button
+                    onClick={() => executeUndo(entry)}
+                    className="text-[9px] px-1.5 py-0.5 rounded hover:bg-white/10 shrink-0"
+                    style={{ color: "#5bc0de", border: "1px solid rgba(91,192,222,0.3)" }}
+                  >Undo</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -54,6 +54,7 @@ export const JSON_COLUMNS = new Set([
   'linked_fields',
   'sources',
   'options',
+  'color_mapping',
 ]);
 
 // ─── Boolean integer columns ──────────────────────────────────────────────────
@@ -64,6 +65,9 @@ export const BOOL_COLUMNS = new Set([
   'is_unique',
   'is_foreign_key',
   'is_active',
+  'font_bold',
+  'font_underline',
+  'wrap',
 ]);
 
 // ─── Parse a row coming OUT of SQLite ────────────────────────────────────────

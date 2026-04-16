@@ -150,6 +150,104 @@ export async function deleteDiscussion(id: number): Promise<{ success: boolean }
   return res.json();
 }
 
+// ─── Display Templates ──────────────────────────────────────────────────────
+
+export interface DisplayTemplate {
+  id: number;
+  templateName: string;
+  displayMode: 'text' | 'pill' | 'chip' | 'tag';
+  fontSize: number | null;
+  fontBold: boolean;
+  fontUnderline: boolean;
+  fontColor: string | null;
+  alignment: 'left' | 'center' | 'right';
+  wrap: boolean;
+  lines: number;
+  colorMapping: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ColumnTemplateAssignment {
+  id: number;
+  entityType: string;
+  columnKey: string;
+  templateId: number;
+}
+
+export async function fetchDisplayTemplates(): Promise<DisplayTemplate[]> {
+  const res = await fetch(`${BASE}/display-templates`);
+  if (!res.ok) throw new Error(`fetchDisplayTemplates failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function createDisplayTemplate(data: Partial<Omit<DisplayTemplate, 'id' | 'createdAt' | 'updatedAt'>>): Promise<DisplayTemplate> {
+  const res = await fetch(`${BASE}/display-templates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `createDisplayTemplate failed: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function updateDisplayTemplate(id: number, data: Partial<Omit<DisplayTemplate, 'id' | 'createdAt' | 'updatedAt'>>): Promise<DisplayTemplate> {
+  const res = await fetch(`${BASE}/display-templates/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`updateDisplayTemplate failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function deleteDisplayTemplate(id: number): Promise<{ success: boolean }> {
+  const res = await fetch(`${BASE}/display-templates/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`deleteDisplayTemplate failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchColumnTemplateAssignments(): Promise<ColumnTemplateAssignment[]> {
+  const res = await fetch(`${BASE}/column-template-assignments`);
+  if (!res.ok) throw new Error(`fetchColumnTemplateAssignments failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function assignColumnTemplate(entityType: string, columnKey: string, templateId: number): Promise<ColumnTemplateAssignment> {
+  const res = await fetch(`${BASE}/column-template-assignments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entityType, columnKey, templateId }),
+  });
+  if (!res.ok) throw new Error(`assignColumnTemplate failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function removeColumnTemplateAssignment(entityType: string, columnKey: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${BASE}/column-template-assignments/${encodeURIComponent(entityType)}/${encodeURIComponent(columnKey)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`removeColumnTemplateAssignment failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function seedDisplayTemplates(
+  columns: Array<{ entityType: string; columnKey: string; columnType: string }>
+): Promise<{ seeded: boolean; templates?: number; assignments?: number; message?: string }> {
+  const res = await fetch(`${BASE}/display-templates/seed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ columns }),
+  });
+  if (!res.ok) throw new Error(`seedDisplayTemplates failed: ${res.statusText}`);
+  return res.json();
+}
+
 // ─── Column Definitions (user-added columns) ────────────────────────────────
 
 export interface ColumnDef {

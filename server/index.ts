@@ -1409,10 +1409,45 @@ app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: 
   // PRAGMA foreign_keys cannot be changed inside a transaction — set it before
   db.pragma('foreign_keys = OFF');
 
+  // Entity type → SQL table mapping for user-defined columns
+  const IMPORT_ENTITY_TABLE: Record<string, string> = {
+    modules: '_splan_modules', features: '_splan_features', concepts: '_splan_concepts',
+    data_tables: '_splan_data_tables', data_fields: '_splan_data_fields',
+    projects: '_splan_projects', research: '_splan_research', prototypes: '_splan_prototypes',
+  };
+
   try {
     const importAll = db.transaction(() => {
+      // Phase 1: Import _splan_column_defs FIRST, then apply user-defined columns
+      // so that data tables have the necessary columns before we insert rows
+      if (tables['_splan_column_defs'] && Array.isArray(tables['_splan_column_defs'])) {
+        const cdRows = tables['_splan_column_defs'];
+        db.exec('DELETE FROM _splan_column_defs');
+        if (cdRows.length > 0) {
+          const cols = Object.keys(cdRows[0]);
+          const placeholders = cols.map(() => '?').join(', ');
+          const insertStmt = db.prepare(`INSERT INTO _splan_column_defs (${cols.join(', ')}) VALUES (${placeholders})`);
+          for (const row of cdRows) { insertStmt.run(...cols.map(c => row[c] ?? null)); }
+          imported['_splan_column_defs'] = cdRows.length;
+        } else {
+          imported['_splan_column_defs'] = 0;
+        }
+
+        // Apply user-defined columns to their target tables
+        for (const def of cdRows) {
+          const sqlTable = IMPORT_ENTITY_TABLE[def.entity_type as string];
+          if (!sqlTable) continue;
+          const colType = def.column_type as string;
+          if (colType === 'formula') continue; // virtual, no DB column
+          const sqlType = colType === 'int' ? 'INTEGER' : colType === 'boolean' ? "INTEGER NOT NULL DEFAULT 0" : "TEXT NOT NULL DEFAULT ''";
+          try { db.exec(`ALTER TABLE ${sqlTable} ADD COLUMN ${def.column_key} ${sqlType}`); } catch { /* already exists */ }
+        }
+      }
+
+      // Phase 2: Import all other tables
       for (const [tableName, rows] of Object.entries(tables)) {
         if (SKIP_TABLES.has(tableName)) continue;
+        if (tableName === '_splan_column_defs') continue; // already handled above
         if (!Array.isArray(rows)) continue;
 
         // Verify this table actually exists in the database
@@ -1429,8 +1464,12 @@ app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: 
           continue;
         }
 
-        // Use columns from the first row
-        const cols = Object.keys(rows[0]);
+        // Filter columns to only those that exist in the target table
+        const tableInfo = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+        const existingCols = new Set(tableInfo.map(c => c.name));
+        const cols = Object.keys(rows[0]).filter(c => existingCols.has(c));
+        if (cols.length === 0) continue;
+
         const placeholders = cols.map(() => '?').join(', ');
         const insertStmt = db.prepare(
           `INSERT INTO ${tableName} (${cols.join(', ')}) VALUES (${placeholders})`

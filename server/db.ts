@@ -364,6 +364,30 @@ function initSchema(db: Database.Database) {
       dismissed_at     TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(change_log_id, test_id)
     );
+
+    CREATE TABLE IF NOT EXISTS _splan_display_templates (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      template_name   TEXT NOT NULL UNIQUE,
+      display_mode    TEXT NOT NULL DEFAULT 'text',
+      font_size       INTEGER,
+      font_bold       INTEGER NOT NULL DEFAULT 0,
+      font_underline  INTEGER NOT NULL DEFAULT 0,
+      font_color      TEXT,
+      alignment       TEXT NOT NULL DEFAULT 'left',
+      wrap            INTEGER NOT NULL DEFAULT 0,
+      lines           INTEGER NOT NULL DEFAULT 1,
+      color_mapping   TEXT NOT NULL DEFAULT '{}',
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS _splan_column_template_assignments (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type     TEXT NOT NULL,
+      column_key      TEXT NOT NULL,
+      template_id     INTEGER NOT NULL REFERENCES _splan_display_templates(id) ON DELETE CASCADE,
+      UNIQUE(entity_type, column_key)
+    );
   `);
 
   // Migrations: add columns to existing tables (safe to re-run — ignores if column exists)
