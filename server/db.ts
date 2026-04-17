@@ -455,6 +455,7 @@ function initSchema(db: Database.Database) {
   migrate('_splan_sync_meta', 'error_message', "TEXT");
   migrate('_splan_sync_meta', 'source', "TEXT NOT NULL DEFAULT 'manual'");
   migrate('_splan_sync_meta', 'attempt_id', "TEXT");
+  migrate('_splan_sync_meta', 'commit_hash', "TEXT");
   // Backfill attempt_id for any pre-F2 rows
   try {
     db.exec("UPDATE _splan_sync_meta SET attempt_id = 'legacy-' || id WHERE attempt_id IS NULL");

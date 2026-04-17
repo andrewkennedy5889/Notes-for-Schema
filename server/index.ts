@@ -1662,13 +1662,14 @@ function recordSyncAttempt(params: {
   remoteUrl?: string;
   rowsSynced?: number;
   errorMessage?: string;
+  commitHash?: string;
 }): { attemptId: string } {
   const attemptId = uuidv4();
   try {
     getDb().prepare(
       `INSERT INTO _splan_sync_meta
-        (sync_direction, remote_url, rows_synced, success, error_message, source, attempt_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+        (sync_direction, remote_url, rows_synced, success, error_message, source, attempt_id, commit_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       params.direction,
       params.remoteUrl || '',
@@ -1677,9 +1678,10 @@ function recordSyncAttempt(params: {
       params.errorMessage ?? null,
       params.source,
       attemptId,
+      params.commitHash ?? null,
     );
   } catch {
-    // Pre-F2 schemas (e.g., remote during the F2 deploy gap) lack the new columns.
+    // Pre-F2 schemas (e.g., remote during a migration gap) lack the new columns.
     // Fall back to the legacy 4-column insert so we don't crash the request.
     try {
       getDb().prepare(
@@ -1764,6 +1766,8 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
   const force = req.query.force === 'true' || (req.body as { force?: boolean })?.force === true;
   const sourceRaw = (req.query.source as string | undefined) ?? (req.body as { source?: string } | undefined)?.source;
   const source = normalizeSource(sourceRaw, force ? 'force-push' : 'manual-push');
+  const commitHashRaw = (req.query.commitHash as string | undefined) ?? (req.body as { commitHash?: string } | undefined)?.commitHash;
+  const commitHash = (typeof commitHashRaw === 'string' && commitHashRaw.trim()) ? commitHashRaw.trim() : undefined;
 
   try {
     const remote = await fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } });
@@ -1776,7 +1780,7 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
         const missingOnRemote = getSchemaTables().filter(t => !remoteSet.has(t));
         if (missingOnRemote.length > 0) {
           const errMsg = `Schema mismatch: remote is missing ${missingOnRemote.length} table(s) (${missingOnRemote.slice(0, 3).join(', ')}${missingOnRemote.length > 3 ? '…' : ''}). Deploy Code first so remote's schema matches.`;
-          const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg });
+          const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg, commitHash });
           return void res.status(409).json({
             error: errMsg,
             schemaMismatch: true,
@@ -1788,7 +1792,7 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
 
       if (!force && s.changeCount > 0) {
         const errMsg = `Remote has ${s.changeCount} unsynced change(s). Pull first, or retry with force=true to overwrite remote.`;
-        const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg });
+        const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg, commitHash });
         return void res.status(409).json({
           error: errMsg,
           conflict: true,
@@ -1826,17 +1830,17 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
     if (!importRes.ok) {
       const errText = await importRes.text();
       const errMsg = `Remote import failed: ${errText.substring(0, 300)}`;
-      const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg });
+      const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg, commitHash });
       return void res.status(500).json({ error: errMsg, attemptId });
     }
 
     const result = await importRes.json() as { success: boolean; imported: Record<string, number> };
 
-    const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: true, remoteUrl: auth.baseUrl, rowsSynced: totalRows });
+    const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: true, remoteUrl: auth.baseUrl, rowsSynced: totalRows, commitHash });
     return void res.json({ success: true, totalRows, imported: result.imported, attemptId });
   } catch (e: unknown) {
     const errMsg = (e as Error).message;
-    const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg });
+    const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg, commitHash });
     return void res.status(500).json({ error: errMsg, attemptId });
   }
 });
@@ -2197,6 +2201,60 @@ app.get('/api/sync/last-attempt', (_req: Request, res: Response) => {
       errorMessage: row.error_message,
       attemptedAt: row.synced_at,
     },
+  });
+});
+
+// Most recent deploy attempt (success, timeout, or failure) + repo URL for linking
+app.get('/api/sync/last-deploy', (_req: Request, res: Response) => {
+  const db = getDb();
+
+  // Resolve repo URL from `git remote get-url origin` (local only; on hosted returns null)
+  let repoUrl: string | null = null;
+  try {
+    const PROJECT_ROOT = path.join(__dirname, '..');
+    const remoteOut = require('child_process').execSync('git remote get-url origin', { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    const match = remoteOut.match(/github\.com[/:](.+?)(?:\.git)?$/);
+    if (match) repoUrl = `https://github.com/${match[1]}`;
+  } catch { /* no git or not github — leave null */ }
+
+  let row: {
+    attempt_id: string | null;
+    source: string;
+    success: number | null;
+    rows_synced: number | null;
+    error_message: string | null;
+    synced_at: string;
+    commit_hash: string | null;
+    id: number;
+  } | undefined;
+
+  try {
+    row = db.prepare(
+      `SELECT attempt_id, source, success, rows_synced, error_message, synced_at, commit_hash, id
+         FROM _splan_sync_meta
+         WHERE source LIKE 'deploy-push%'
+         ORDER BY synced_at DESC, id DESC
+         LIMIT 1`
+    ).get() as typeof row;
+  } catch { /* pre-migration schema */ }
+
+  if (!row) return void res.json({ deploy: null, repoUrl });
+
+  let status: 'success' | 'timeout' | 'failed';
+  if (row.source === 'deploy-push' && row.success === 1) status = 'success';
+  else if (row.source === 'deploy-push-timeout' && row.success === 1) status = 'timeout';
+  else status = 'failed';
+
+  return void res.json({
+    deploy: {
+      id: row.attempt_id || `legacy-${row.id}`,
+      status,
+      commitHash: row.commit_hash,
+      rowsSynced: row.rows_synced,
+      errorMessage: row.error_message,
+      attemptedAt: row.synced_at,
+    },
+    repoUrl,
   });
 });
 

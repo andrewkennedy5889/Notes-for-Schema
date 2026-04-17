@@ -391,10 +391,11 @@ export async function fetchSyncStatus(): Promise<SyncStatus> {
   return res.json();
 }
 
-export async function syncPush(opts?: { force?: boolean; source?: string }): Promise<{ success: boolean; totalRows: number; error?: string; conflict?: boolean; remoteChangeCount?: number; attemptId?: string }> {
+export async function syncPush(opts?: { force?: boolean; source?: string; commitHash?: string }): Promise<{ success: boolean; totalRows: number; error?: string; conflict?: boolean; remoteChangeCount?: number; attemptId?: string }> {
   const params = new URLSearchParams();
   if (opts?.force) params.set('force', 'true');
   if (opts?.source) params.set('source', opts.source);
+  if (opts?.commitHash) params.set('commitHash', opts.commitHash);
   const qs = params.toString();
   const url = qs ? `${BASE}/sync/push?${qs}` : `${BASE}/sync/push`;
   const res = await fetch(url, { method: 'POST' });
@@ -427,6 +428,23 @@ export async function fetchLastSyncAttempt(): Promise<LastSyncAttempt | null> {
   if (!res.ok) return null;
   const json = await res.json() as { attempt: LastSyncAttempt | null };
   return json.attempt;
+}
+
+// Most recent deploy attempt (success, timeout, or failure). Derived from rows
+// in _splan_sync_meta where source starts with 'deploy-push'.
+export interface LastDeploy {
+  id: string;
+  status: 'success' | 'timeout' | 'failed';
+  commitHash: string | null;
+  rowsSynced: number | null;
+  errorMessage: string | null;
+  attemptedAt: string;
+}
+
+export async function fetchLastDeploy(): Promise<{ deploy: LastDeploy | null; repoUrl: string | null }> {
+  const res = await fetch(`${BASE}/sync/last-deploy`);
+  if (!res.ok) return { deploy: null, repoUrl: null };
+  return res.json();
 }
 
 // ─── Sync diff ───────────────────────────────────────────────────────────────

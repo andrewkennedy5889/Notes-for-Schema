@@ -4,7 +4,7 @@ import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import AgentsTab from "../components/schema-planner/AgentsTab";
 import NotebookTab from "../components/schema-planner/NotebookTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
-import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt } from "../lib/api";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, fetchLastDeploy, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt, type LastDeploy } from "../lib/api";
 import SyncDiffViewer from "../components/schema-planner/SyncDiffViewer";
 import AutoSyncToast from "../components/schema-planner/AutoSyncToast";
 
@@ -288,6 +288,10 @@ export default function SchemaPlanner() {
   const [lastAttempt, setLastAttempt] = useState<LastSyncAttempt | null>(null);
   const [popoverOpen, setPopoverOpen] = useState(false);
 
+  // Last deploy (success / timeout / failed) + repo URL for GitHub linking
+  const [lastDeploy, setLastDeploy] = useState<LastDeploy | null>(null);
+  const [repoUrl, setRepoUrl] = useState<string | null>(null);
+
   // F5: dismissed attempt IDs
   const [dismissedAttempts, setDismissedAttempts] = useState<string[]>(() => readDismissed());
 
@@ -346,6 +350,17 @@ export default function SchemaPlanner() {
   const refreshLastAttempt = useCallback(() => {
     fetchLastSyncAttempt().then(setLastAttempt).catch(() => {});
   }, []);
+
+  const refreshLastDeploy = useCallback(() => {
+    fetchLastDeploy().then(r => { setLastDeploy(r.deploy); setRepoUrl(r.repoUrl); }).catch(() => {});
+  }, []);
+
+  // Poll last-deploy every 60s (changes less often than last-attempt)
+  useEffect(() => {
+    refreshLastDeploy();
+    const interval = setInterval(refreshLastDeploy, 60000);
+    return () => clearInterval(interval);
+  }, [refreshLastDeploy]);
 
   type SyncOpts = { force?: boolean; source?: string; followUpCount?: number };
 
@@ -490,9 +505,10 @@ export default function SchemaPlanner() {
     const fresh = await fetchSyncStatus().catch(() => null);
     if (fresh) setSyncStatus(fresh);
     refreshLastAttempt();
+    refreshLastDeploy();
     refreshVersionState();
     hasAutoSyncedOnMount.current = false;
-  }, [refreshLastAttempt, refreshVersionState]);
+  }, [refreshLastAttempt, refreshLastDeploy, refreshVersionState]);
 
   // F8/F1: shared poll-loop runner, callable from initial deploy AND from resume
   const startDeployPolling = useCallback((targetCommit: string, startTime: number, remoteUrl: string) => {
@@ -505,7 +521,7 @@ export default function SchemaPlanner() {
           clearInterval(poll);
           setDeployProgress({ status: `Live — pushing data...`, elapsed, targetCommit });
           try {
-            const pushResult = await syncPush({ source: 'deploy-push' });
+            const pushResult = await syncPush({ source: 'deploy-push', commitHash: targetCommit });
             if (pushResult.success) {
               setSyncResult(`✅ Deploy complete: commit ${targetCommit} (${elapsed}s) + pushed ${pushResult.totalRows} rows`);
               setDeployTitle('success');
@@ -539,7 +555,8 @@ export default function SchemaPlanner() {
         clearInterval(poll);
         setDeployProgress(null);
         try {
-          const pushResult = await syncPush({ source: 'deploy-push' });
+          // Distinct source so "Last deploy" can distinguish a clean deploy from a timed-out one
+          const pushResult = await syncPush({ source: 'deploy-push-timeout', commitHash: targetCommit });
           if (pushResult.success) {
             setSyncResult(`⚠️ Deploy timed out after 10 minutes but data push succeeded (${pushResult.totalRows} rows). Remote may still be on the old code — check Railway.`);
             setDeployTitle('fail');
@@ -1440,7 +1457,7 @@ export default function SchemaPlanner() {
               ) : (
                 <>
                   {/* Status line */}
-                  <div className="flex items-center gap-2 mb-3">
+                  <div className="flex items-center gap-2 mb-2">
                     <span
                       className="w-2.5 h-2.5 rounded-full shrink-0"
                       style={{ backgroundColor: (syncStatus.remote?.changeCount ?? 0) > 0 ? "#f2b661" : "#4ecb71" }}
@@ -1449,6 +1466,47 @@ export default function SchemaPlanner() {
                       {syncStatus.lastSync
                         ? `Last sync: ${new Date(syncStatus.lastSync.syncedAt + 'Z').toLocaleString()} (${syncStatus.lastSync.direction}, ${syncStatus.lastSync.rowsSynced} rows)`
                         : "Never synced"}
+                    </span>
+                  </div>
+
+                  {/* Last deploy line */}
+                  <div className="flex items-center gap-2 mb-3">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{
+                        backgroundColor: !lastDeploy ? "#8899a6"
+                          : lastDeploy.status === 'success' ? "#4ecb71"
+                          : lastDeploy.status === 'timeout' ? "#f2b661"
+                          : "#e05555",
+                      }}
+                    />
+                    <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                      {!lastDeploy ? (
+                        "No deploys recorded yet"
+                      ) : (
+                        <>
+                          Last deploy: {new Date(lastDeploy.attemptedAt + 'Z').toLocaleString()} (
+                          {lastDeploy.commitHash ? (
+                            repoUrl ? (
+                              <a
+                                href={`${repoUrl}/commit/${lastDeploy.commitHash}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{ color: "var(--color-primary)", textDecoration: "underline" }}
+                                title="View commit on GitHub"
+                              >
+                                commit {lastDeploy.commitHash}
+                              </a>
+                            ) : (
+                              <>commit {lastDeploy.commitHash}</>
+                            )
+                          ) : '(no commit)'}
+                          {lastDeploy.status === 'success' && ", succeeded"}
+                          {lastDeploy.status === 'timeout' && ", timed out — remote may still be on older code"}
+                          {lastDeploy.status === 'failed' && `, failed${lastDeploy.errorMessage ? `: ${lastDeploy.errorMessage.slice(0, 120)}` : ''}`}
+                          )
+                        </>
+                      )}
                     </span>
                   </div>
 
