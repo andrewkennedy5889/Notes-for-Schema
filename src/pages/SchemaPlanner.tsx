@@ -389,19 +389,71 @@ export default function SchemaPlanner() {
                         <span className="truncate font-medium" style={{ fontSize: 12 }}>
                           {label}
                         </span>
-                        {tabKey === "settings" && syncStatus?.configured && (syncStatus.remote?.changeCount ?? 0) > 0 && (
-                          <span
-                            className="w-2 h-2 rounded-full shrink-0 ml-auto"
-                            style={{ backgroundColor: "#f2b661" }}
-                            title={`${syncStatus.remote!.changeCount} unsaved remote change(s)`}
-                          />
-                        )}
-                        {tabKey === "settings" && syncStatus?.configured && (syncStatus.remote?.changeCount ?? 0) === 0 && syncStatus.lastSync && (
-                          <span
-                            className="w-2 h-2 rounded-full shrink-0 ml-auto"
-                            style={{ backgroundColor: "#4ecb71" }}
-                            title="In sync"
-                          />
+                        {tabKey === "settings" && syncStatus?.configured && (syncStatus.lastSync || (syncStatus.remote?.changeCount ?? 0) > 0) && (
+                          <span className="relative ml-auto shrink-0 group/badge">
+                            <span
+                              className="w-2 h-2 rounded-full block"
+                              style={{ backgroundColor: (syncStatus.remote?.changeCount ?? 0) > 0 || (syncStatus.local?.changeCount ?? 0) > 0 ? "#f2b661" : "#4ecb71" }}
+                            />
+                            {/* Hover tooltip */}
+                            <div
+                              className="hidden group-hover/badge:block absolute left-4 bottom-0 z-50 w-72 p-2 rounded shadow-lg border text-[10px]"
+                              style={{ backgroundColor: "var(--color-surface)", borderColor: "var(--color-divider)" }}
+                            >
+                              {syncStatus.lastSync && (
+                                <div className="mb-1.5" style={{ color: "var(--color-text-subtle)" }}>
+                                  Last sync: {new Date(syncStatus.lastSync.syncedAt + 'Z').toLocaleString()} ({syncStatus.lastSync.direction})
+                                </div>
+                              )}
+                              {(syncStatus.remote?.changeCount ?? 0) > 0 && (
+                                <div className="mb-1.5">
+                                  <div className="font-semibold mb-1" style={{ color: "#f2b661" }}>
+                                    Remote ({syncStatus.remote!.changeCount})
+                                  </div>
+                                  <table className="w-full" style={{ color: "var(--color-text-muted)" }}>
+                                    <tbody>
+                                      {(syncStatus.remote!.changes || []).slice(0, 8).map((ch, i) => (
+                                        <tr key={i}>
+                                          <td className="pr-1">{ch.action}</td>
+                                          <td className="pr-1">{ch.entity_type}</td>
+                                          <td className="pr-1">{ch.field_changed || ''}</td>
+                                          <td style={{ color: "var(--color-text-subtle)" }}>{new Date(ch.changed_at + 'Z').toLocaleTimeString()}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                  {(syncStatus.remote!.changeCount) > 8 && (
+                                    <div style={{ color: "var(--color-text-subtle)" }}>...and {syncStatus.remote!.changeCount - 8} more</div>
+                                  )}
+                                </div>
+                              )}
+                              {(syncStatus.local?.changeCount ?? 0) > 0 && (
+                                <div>
+                                  <div className="font-semibold mb-1" style={{ color: "#428bca" }}>
+                                    Local ({syncStatus.local!.changeCount})
+                                  </div>
+                                  <table className="w-full" style={{ color: "var(--color-text-muted)" }}>
+                                    <tbody>
+                                      {(syncStatus.local!.changes || []).slice(0, 8).map((ch, i) => (
+                                        <tr key={i}>
+                                          <td className="pr-1">{ch.action}</td>
+                                          <td className="pr-1">{ch.entity_type}</td>
+                                          <td className="pr-1">{ch.field_changed || ''}</td>
+                                          <td style={{ color: "var(--color-text-subtle)" }}>{new Date(ch.changed_at + 'Z').toLocaleTimeString()}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                  {(syncStatus.local!.changeCount) > 8 && (
+                                    <div style={{ color: "var(--color-text-subtle)" }}>...and {syncStatus.local!.changeCount - 8} more</div>
+                                  )}
+                                </div>
+                              )}
+                              {(syncStatus.remote?.changeCount ?? 0) === 0 && (syncStatus.local?.changeCount ?? 0) === 0 && (
+                                <div style={{ color: "#4ecb71" }}>In sync — no pending changes</div>
+                              )}
+                            </div>
+                          </span>
                         )}
                       </>
                     )}

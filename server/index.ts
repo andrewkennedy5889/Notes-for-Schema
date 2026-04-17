@@ -1573,7 +1573,23 @@ app.post('/api/sync/pull', async (_req: Request, res: Response) => {
     const exportRes = await fetch(`${auth.baseUrl}/api/db-export`, { headers: { Cookie: auth.cookie } });
     if (!exportRes.ok) return void res.status(500).json({ error: `Remote export failed: ${exportRes.status}` });
 
+    // Safety check: don't overwrite a full local DB with an empty remote
+    const db0 = getDb();
+    const localTotal = (db0.prepare(
+      "SELECT SUM(cnt) as total FROM (SELECT COUNT(*) as cnt FROM _splan_modules UNION ALL SELECT COUNT(*) FROM _splan_features UNION ALL SELECT COUNT(*) FROM _splan_data_tables UNION ALL SELECT COUNT(*) FROM _splan_concepts)"
+    ).get() as { total: number }).total || 0;
+
     const { tables } = await exportRes.json() as { tables: Record<string, Record<string, unknown>[]> };
+
+    // Count remote rows in key tables
+    const remoteTotal = (tables['_splan_modules']?.length || 0) + (tables['_splan_features']?.length || 0)
+      + (tables['_splan_data_tables']?.length || 0) + (tables['_splan_concepts']?.length || 0);
+
+    if (localTotal > 20 && remoteTotal === 0) {
+      return void res.status(400).json({
+        error: `Safety check: local has ${localTotal} rows in core tables but remote has 0. The remote may have been wiped by a redeploy. Push your local data first instead.`,
+      });
+    }
 
     const db = getDb();
     const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta']);
