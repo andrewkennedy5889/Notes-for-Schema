@@ -14,6 +14,7 @@ import { authRouter, authMiddleware } from './auth.js';
 import { getAppMode, requireLocal } from './app-mode.js';
 import { getScheduledAgent, SCHEDULED_AGENTS } from './scheduled-agents/registry.js';
 import { schemaFingerprint } from './schema-fingerprint.js';
+import { extractDependencyRefs, DependencyRefType } from './text-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -139,6 +140,111 @@ function logChange(params: {
     params.newValue !== undefined ? String(params.newValue) : null,
     params.reasoning ?? null,
   );
+}
+
+/** Look up the current display name for a ref. Returned name is cached on the
+ *  dependency row so that if the target later moves/deletes, the stale row still
+ *  renders something meaningful. Failures return null. */
+function resolveRefName(refType: DependencyRefType, refId: string): string | null {
+  const db = getDb();
+  const n = Number(refId);
+  try {
+    switch (refType) {
+      case 'Table':
+        return (db.prepare('SELECT table_name FROM _splan_data_tables WHERE table_id = ?').get(n) as { table_name: string } | undefined)?.table_name ?? null;
+      case 'Field':
+        return (db.prepare(
+          "SELECT t.table_name || '.' || f.field_name AS qname FROM _splan_data_fields f JOIN _splan_data_tables t ON t.table_id = f.data_table_id WHERE f.field_id = ?"
+        ).get(n) as { qname: string } | undefined)?.qname ?? null;
+      case 'Module':
+        return (db.prepare('SELECT module_name FROM _splan_modules WHERE module_id = ?').get(n) as { module_name: string } | undefined)?.module_name ?? null;
+      case 'Feature':
+        return (db.prepare('SELECT feature_name FROM _splan_features WHERE feature_id = ?').get(n) as { feature_name: string } | undefined)?.feature_name ?? null;
+      case 'Concept':
+        return (db.prepare('SELECT concept_name FROM _splan_concepts WHERE concept_id = ?').get(n) as { concept_name: string } | undefined)?.concept_name ?? null;
+      case 'Research':
+        return (db.prepare('SELECT title FROM _splan_research WHERE research_id = ?').get(n) as { title: string } | undefined)?.title ?? null;
+      case 'Image':
+        return null;
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** Sync the deps table with the refs present in a note. Called whenever a
+ *  note's content changes.
+ *
+ *  Per PRD §5.3:
+ *    - new refs  → INSERT auto_added=1, explanation='', last_analyzed_at=NULL
+ *    - removed auto refs → UPDATE is_stale=1 (manual refs and user-edited rows survive)
+ *    - previously-stale refs back in text → UPDATE is_stale=0
+ *    - manual (auto_added=0) refs are never stale-marked — user owns them
+ *
+ *  Returns a summary string for the change-log entry. Callers log ONE entry
+ *  per note save regardless of how many deps were touched (§D8).
+ */
+function syncDependencies(params: {
+  entityType: string;
+  entityId: number;
+  noteKey: string;
+  content: string | null;
+}): { added: number; staled: number; unstaled: number } {
+  const db = getDb();
+  const { entityType, entityId, noteKey } = params;
+  const refs = extractDependencyRefs(params.content);
+
+  const existing = db.prepare(
+    'SELECT * FROM _splan_entity_dependencies WHERE entity_type = ? AND entity_id = ? AND note_key = ?'
+  ).all(entityType, entityId, noteKey) as Array<Record<string, unknown>>;
+
+  const currentKeys = new Set(refs.map((r) => `${r.refType}:${r.refId}`));
+  const existingByKey = new Map<string, Record<string, unknown>>();
+  for (const row of existing) existingByKey.set(`${row.ref_type}:${row.ref_id}`, row);
+
+  const insert = db.prepare(
+    `INSERT INTO _splan_entity_dependencies
+       (entity_type, entity_id, note_key, ref_type, ref_id, ref_name, explanation, auto_added)
+     VALUES (?, ?, ?, ?, ?, ?, '', 1)`
+  );
+  const unstale = db.prepare(
+    "UPDATE _splan_entity_dependencies SET is_stale = 0, updated_at = datetime('now') WHERE id = ?"
+  );
+  const stale = db.prepare(
+    "UPDATE _splan_entity_dependencies SET is_stale = 1, updated_at = datetime('now') WHERE id = ?"
+  );
+
+  let added = 0;
+  let staled = 0;
+  let unstaled = 0;
+
+  // Wrap all writes in a single transaction so a partial failure leaves the deps state consistent.
+  const txn = db.transaction(() => {
+    for (const r of refs) {
+      const row = existingByKey.get(`${r.refType}:${r.refId}`);
+      if (!row) {
+        const refName = resolveRefName(r.refType, r.refId) ?? r.fallbackName;
+        insert.run(entityType, entityId, noteKey, r.refType, r.refId, refName);
+        added++;
+      } else if (row.is_stale === 1) {
+        unstale.run(row.id);
+        unstaled++;
+      }
+    }
+    for (const row of existing) {
+      const key = `${row.ref_type}:${row.ref_id}`;
+      if (currentKeys.has(key)) continue;
+      if (row.auto_added !== 1) continue; // manual deps are user-owned
+      if (row.is_stale === 1) continue;    // already stale
+      stale.run(row.id);
+      staled++;
+    }
+  });
+  txn();
+
+  return { added, staled, unstaled };
 }
 
 // ─── GET /api/schema-planner ──────────────────────────────────────────────────
@@ -399,8 +505,8 @@ app.post('/api/column-defs', (req: Request, res: Response) => {
   const sortOrder = ((maxRow?.mx) ?? -1) + 1;
 
   // Formula columns are virtual (computed client-side) — no real DB column needed.
-  // Notes columns store data in the shared _splan_entity_notes table — no real DB column needed.
-  if (columnType !== 'formula' && columnType !== 'notes') {
+  // Notes + dependencies columns store data in shared _splan_entity_* tables — no real DB column needed.
+  if (columnType !== 'formula' && columnType !== 'notes' && columnType !== 'dependencies') {
     const sqlType = columnType === 'int' ? 'INTEGER' : columnType === 'boolean' ? "INTEGER NOT NULL DEFAULT 0" : "TEXT NOT NULL DEFAULT ''";
     try {
       db.exec(`ALTER TABLE ${sqlTable} ADD COLUMN ${columnKey} ${sqlType}`);
@@ -413,6 +519,22 @@ app.post('/api/column-defs', (req: Request, res: Response) => {
   const info = db.prepare(
     'INSERT INTO _splan_column_defs (entity_type, column_key, label, column_type, options, formula, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ).run(entityType, columnKey, label, columnType || 'text', JSON.stringify(options || []), formula || '', sortOrder);
+
+  // Auto-pair: every custom Notes column gets a hidden-by-default Dependencies column right next to it.
+  // Key convention is `{notesKey}_deps`. Per BUG-A6 the notesKey is uc_-prefixed client-side, so deps
+  // inherit the same prefix automatically and survive mergeColumnDefs.
+  if (columnType === 'notes') {
+    const depsKey = `${columnKey}_deps`;
+    const depsLabel = `${label} Dependencies`;
+    const depsExists = db.prepare(
+      'SELECT id FROM _splan_column_defs WHERE entity_type = ? AND column_key = ?'
+    ).get(entityType, depsKey);
+    if (!depsExists) {
+      db.prepare(
+        'INSERT INTO _splan_column_defs (entity_type, column_key, label, column_type, options, formula, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(entityType, depsKey, depsLabel, 'dependencies', '[]', '', sortOrder + 1);
+    }
+  }
 
   const created = db.prepare('SELECT * FROM _splan_column_defs WHERE id = ?').get(info.lastInsertRowid) as Record<string, unknown>;
   return void res.status(201).json(parseRow(created));
@@ -428,8 +550,8 @@ app.delete('/api/column-defs/:id', (req: Request, res: Response) => {
   const sqlTable = ENTITY_SQL_TABLE[def.entity_type as string];
 
   // Drop the column from the actual table.
-  // Formula columns are virtual; Notes columns live in _splan_entity_notes — neither has a real column to drop.
-  if (sqlTable && def.column_type !== 'formula' && def.column_type !== 'notes') {
+  // Formula/notes/dependencies columns are virtual — nothing to DROP COLUMN.
+  if (sqlTable && def.column_type !== 'formula' && def.column_type !== 'notes' && def.column_type !== 'dependencies') {
     try {
       db.exec(`ALTER TABLE ${sqlTable} DROP COLUMN ${def.column_key}`);
     } catch {
@@ -437,7 +559,9 @@ app.delete('/api/column-defs/:id', (req: Request, res: Response) => {
     }
   }
 
-  // For Notes columns, also clean up any stored note rows for this column key
+  // For Notes columns, clean up the shared-store rows AND the auto-paired deps column_def.
+  // Per D4, deletion is hard (no soft-delete window) and covers both the notes rows,
+  // the deps rows, and the paired deps column_def.
   if (def.column_type === 'notes') {
     try {
       const entityType = (
@@ -451,6 +575,9 @@ app.delete('/api/column-defs/:id', (req: Request, res: Response) => {
         .run(entityType, def.column_key);
       db.prepare('DELETE FROM _splan_entity_dependencies WHERE entity_type = ? AND note_key = ?')
         .run(entityType, def.column_key);
+      // Cascade the paired deps column_def (same entity, key = notesKey + '_deps').
+      db.prepare('DELETE FROM _splan_column_defs WHERE entity_type = ? AND column_key = ?')
+        .run(def.entity_type, `${def.column_key}_deps`);
     } catch { /* ignore */ }
   }
 
@@ -551,6 +678,28 @@ app.put('/api/schema-planner/notes', (req: Request, res: Response) => {
       newValue: newContent,
       reasoning: reasoning ?? `Notes edit: ${noteKey}`,
     });
+  }
+
+  // Auto-extract refs from the new content and sync the paired deps table.
+  // Only runs when the content (not just formatting) actually changed, since
+  // formatting-only edits can't change which refs are present.
+  if (String(oldContent) !== String(newContent)) {
+    const summary = syncDependencies({ entityType, entityId, noteKey, content: newContent });
+    const touched = summary.added + summary.staled + summary.unstaled;
+    if (touched > 0) {
+      const parts: string[] = [];
+      if (summary.added) parts.push(`${summary.added} added`);
+      if (summary.staled) parts.push(`${summary.staled} stale`);
+      if (summary.unstaled) parts.push(`${summary.unstaled} un-stale`);
+      logChange({
+        entityType,
+        entityId,
+        action: 'UPDATE',
+        fieldChanged: `${noteKey}_deps`,
+        newValue: parts.join(', '),
+        reasoning: `Auto-extract from notes edit: ${noteKey}`,
+      });
+    }
   }
 
   const fresh = db.prepare(
