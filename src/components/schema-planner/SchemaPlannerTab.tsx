@@ -361,6 +361,7 @@ const TAB_ENTITY_MAP: Record<string, string> = {
   modules: "modules", features: "features", concepts: "concepts",
   data_tables: "data_tables", data_fields: "data_fields",
   projects: "projects", research: "research", prototypes: "prototypes",
+  feedback: "feedback",
 };
 
 /** Merge user-defined column defs into TABLE_CONFIGS (mutates in place, idempotent) */

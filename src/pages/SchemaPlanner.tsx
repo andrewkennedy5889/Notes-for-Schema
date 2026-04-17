@@ -74,6 +74,7 @@ const TAB_ICONS: Record<string, string> = {
   prototypes: "🧪",
   concepts: "💡",
   research: "🔬",
+  feedback: "💬",
   data_access_rules: "🔒",
   change_log: "📋",
   all_test_cases: "✅",
@@ -88,12 +89,11 @@ const TAB_LABELS: Record<string, string> = {
 };
 
 const TAB_GROUPS = [
-  { label: "Notes", tabs: ["notebook"] },
-  { label: "Projects", tabs: ["projects"] },
-  { label: "Core", tabs: ["modules", "features", "concepts", "research", "all_test_cases"] },
-  { label: "Data", tabs: ["data_tables", "data_fields", "module_use_fields"] },
-  { label: "Quality", tabs: ["feature_concerns", "data_reviews", "access_matrix", "prototypes"] },
-  { label: "Access & Audit", tabs: ["data_access_rules", "change_log"] },
+  { label: "Workspace", tabs: ["notebook", "projects"] },
+  { label: "Planning", tabs: ["modules", "features", "concepts", "research", "feedback"] },
+  { label: "Data Model", tabs: ["data_tables", "data_fields", "module_use_fields", "data_access_rules"] },
+  { label: "Quality & Review", tabs: ["all_test_cases", "feature_concerns", "data_reviews", "access_matrix", "prototypes"] },
+  { label: "Audit", tabs: ["change_log"] },
   { label: "Settings", tabs: ["agents", "settings"] },
 ];
 
@@ -343,36 +343,56 @@ export default function SchemaPlanner() {
           borderColor: "var(--color-divider)",
         }}
       >
-        {/* App header */}
-        <div
-          className="flex items-center gap-2 px-3 py-3 border-b shrink-0"
-          style={{ borderColor: "var(--color-divider)", minHeight: 48 }}
-        >
-          <button
-            onClick={() => setSidebarOpen((v) => !v)}
-            className="w-7 h-7 rounded flex items-center justify-center shrink-0 text-base transition-colors hover:bg-white/10"
-            style={{ color: "var(--color-text-muted)" }}
-            title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+        {/* App title (arrow moved into first category row) */}
+        {sidebarOpen && (
+          <div
+            className="flex items-center px-3 py-2 border-b shrink-0"
+            style={{ borderColor: "var(--color-divider)" }}
           >
-            {sidebarOpen ? "◀" : "▶"}
-          </button>
-          {sidebarOpen && (
             <span className="text-sm font-bold truncate" style={{ color: "var(--color-text)" }}>
               Schema Planner
             </span>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Nav items */}
-        <nav className="flex-1 overflow-y-auto py-2">
-          {TAB_GROUPS.map((group) => (
-            <div key={group.label} className="mb-1">
+        <nav className="flex-1 overflow-y-auto pb-2">
+          {!sidebarOpen && (
+            <div className="flex justify-center pt-2 pb-1">
+              <button
+                onClick={() => setSidebarOpen(true)}
+                className="w-7 h-7 rounded flex items-center justify-center text-base transition-colors hover:bg-white/10"
+                style={{ color: "var(--color-text-muted)" }}
+                title="Expand sidebar"
+              >
+                ▶
+              </button>
+            </div>
+          )}
+          {TAB_GROUPS.map((group, groupIdx) => (
+            <div key={group.label}>
               {sidebarOpen && (
-                <div
-                  className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider"
-                  style={{ color: "var(--color-text-subtle)" }}
-                >
-                  {group.label}
+                <div className="flex items-center gap-1.5 px-2 py-1.5">
+                  {groupIdx === 0 && (
+                    <button
+                      onClick={() => setSidebarOpen(false)}
+                      className="w-5 h-5 rounded flex items-center justify-center shrink-0 text-xs transition-colors hover:bg-white/10"
+                      style={{ color: "var(--color-text-muted)" }}
+                      title="Collapse sidebar"
+                    >
+                      ◀
+                    </button>
+                  )}
+                  <span
+                    className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md border"
+                    style={{
+                      color: "#000",
+                      borderColor: "#000",
+                      backgroundColor: "#f2b661",
+                    }}
+                  >
+                    {group.label}
+                  </span>
                 </div>
               )}
               {group.tabs.map((tabKey) => {

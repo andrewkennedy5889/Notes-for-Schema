@@ -79,15 +79,42 @@ export function MultiSelect({
   onChange: (ids: number[]) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const ref = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+        setQuery("");
+      }
     }
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
+
+  useEffect(() => {
+    if (open) setTimeout(() => searchRef.current?.focus(), 0);
+  }, [open]);
+
+  // Always show selected items; filter the rest by substring match, prefix matches ranked first, capped at 10.
+  const selectedOptions = options.filter((o) => selected.includes(o.id));
+  const q = query.trim().toLowerCase();
+  const unselected = options.filter((o) => !selected.includes(o.id));
+  const filtered = q
+    ? unselected
+        .map((o) => {
+          const name = o.name.toLowerCase();
+          const idx = name.indexOf(q);
+          if (idx === -1) return null;
+          return { o, rank: idx === 0 ? 0 : 1, idx };
+        })
+        .filter((x): x is { o: { id: number; name: string }; rank: number; idx: number } => x !== null)
+        .sort((a, b) => a.rank - b.rank || a.idx - b.idx || a.o.name.localeCompare(b.o.name))
+        .slice(0, 10)
+        .map((x) => x.o)
+    : unselected.slice(0, 10);
 
   return (
     <div className="relative" ref={ref}>
@@ -101,22 +128,54 @@ export function MultiSelect({
         <span style={{ color: "var(--color-text-muted)" }}>▾</span>
       </button>
       {open && (
-        <div className="absolute top-full left-0 right-0 mt-1 rounded-md border shadow-lg max-h-48 overflow-y-auto z-10" style={{ backgroundColor: "var(--color-background)", borderColor: "var(--color-divider)" }}>
-          {options.map((o) => (
+        <div className="absolute top-full left-0 right-0 mt-1 rounded-md border shadow-lg max-h-64 overflow-y-auto z-10" style={{ backgroundColor: "var(--color-background)", borderColor: "var(--color-divider)" }}>
+          <div className="sticky top-0 p-1.5 border-b" style={{ backgroundColor: "var(--color-background)", borderColor: "var(--color-divider)" }}>
+            <input
+              ref={searchRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Type to search..."
+              className="w-full px-2 py-1 text-xs rounded border focus:outline-none"
+              style={{ borderColor: "var(--color-divider)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
+            />
+          </div>
+          {selectedOptions.length > 0 && (
+            <div className="py-0.5">
+              {selectedOptions.map((o) => (
+                <label key={o.id} className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-black/5 text-sm" style={{ color: "var(--color-text)" }}>
+                  <input
+                    type="checkbox"
+                    checked
+                    onChange={() => onChange(selected.filter((id) => id !== o.id))}
+                    style={{ accentColor: "var(--color-primary)" }}
+                  />
+                  {o.name}
+                </label>
+              ))}
+              <div className="border-t my-0.5" style={{ borderColor: "var(--color-divider)" }} />
+            </div>
+          )}
+          {filtered.map((o) => (
             <label key={o.id} className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-black/5 text-sm" style={{ color: "var(--color-text)" }}>
               <input
                 type="checkbox"
-                checked={selected.includes(o.id)}
-                onChange={(e) => {
-                  if (e.target.checked) onChange([...selected, o.id]);
-                  else onChange(selected.filter((id) => id !== o.id));
-                }}
+                checked={false}
+                onChange={() => onChange([...selected, o.id])}
                 style={{ accentColor: "var(--color-primary)" }}
               />
               {o.name}
             </label>
           ))}
           {options.length === 0 && <p className="px-3 py-2 text-xs" style={{ color: "var(--color-text-muted)" }}>No options available</p>}
+          {options.length > 0 && filtered.length === 0 && selectedOptions.length === 0 && (
+            <p className="px-3 py-2 text-xs" style={{ color: "var(--color-text-muted)" }}>No matches</p>
+          )}
+          {!q && unselected.length > 10 && (
+            <p className="px-3 py-1.5 text-[10px] border-t" style={{ color: "var(--color-text-muted)", borderColor: "var(--color-divider)" }}>
+              Showing 10 of {unselected.length}. Type to search.
+            </p>
+          )}
         </div>
       )}
     </div>

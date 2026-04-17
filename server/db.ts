@@ -290,6 +290,17 @@ function initSchema(db: Database.Database) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS _splan_feedback (
+      feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT,
+      systems TEXT NOT NULL DEFAULT '[]',
+      related_concept_id INTEGER REFERENCES _splan_concepts(concept_id) ON DELETE SET NULL,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS _splan_prototypes (
       prototype_id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,

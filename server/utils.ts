@@ -55,6 +55,7 @@ export const JSON_COLUMNS = new Set([
   'sources',
   'options',
   'color_mapping',
+  'systems',
 ]);
 
 // ─── Boolean integer columns ──────────────────────────────────────────────────

@@ -76,6 +76,7 @@ const TABLE_MAP: Record<string, { sqlTable: string; idCol: string; idKey: string
   '_splan_prototypes':            { sqlTable: '_splan_prototypes',            idCol: 'prototype_id', idKey: 'prototypeId',     entityType: 'prototype' },
   '_splan_concepts':              { sqlTable: '_splan_concepts',              idCol: 'concept_id',  idKey: 'conceptId',       entityType: 'concept' },
   '_splan_research':              { sqlTable: '_splan_research',              idCol: 'research_id', idKey: 'researchId',      entityType: 'research' },
+  '_splan_feedback':              { sqlTable: '_splan_feedback',              idCol: 'feedback_id', idKey: 'feedbackId',      entityType: 'feedback' },
   '_splan_all_tests':             { sqlTable: '_splan_all_tests',             idCol: 'test_id',     idKey: 'testId',          entityType: 'test' },
   '_splan_projects':              { sqlTable: '_splan_projects',              idCol: 'project_id',  idKey: 'projectId',       entityType: 'project' },
   '_splan_code_changes':          { sqlTable: '_splan_code_changes',          idCol: 'change_id',   idKey: 'changeId',        entityType: 'code_change' },
