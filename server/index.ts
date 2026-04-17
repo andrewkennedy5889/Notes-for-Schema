@@ -1638,6 +1638,85 @@ app.delete('/api/agents/schedules/:agentId', (req: Request, res: Response) => {
   }
 });
 
+// GET /api/agents/scheduled-runs?agentId=&limit=&status= — list recent runs
+app.get('/api/agents/scheduled-runs', (req: Request, res: Response) => {
+  const agentId = (req.query.agentId as string | undefined) ?? null;
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 500);
+  const status = (req.query.status as string | undefined) ?? null;
+
+  const db = getDb();
+  const clauses: string[] = [];
+  const args: unknown[] = [];
+  if (agentId) { clauses.push('agent_id = ?'); args.push(agentId); }
+  if (status) { clauses.push('status = ?'); args.push(status); }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+
+  // Prune rows older than 90 days to match agent-history.json.
+  const pruneCutoff = new Date(Date.now() - HISTORY_MAX_AGE_MS).toISOString();
+  db.prepare('DELETE FROM _splan_scheduled_runs WHERE fired_at < ?').run(pruneCutoff);
+
+  const rows = db.prepare(
+    `SELECT * FROM _splan_scheduled_runs ${where} ORDER BY fired_at DESC LIMIT ?`
+  ).all(...args, limit) as Array<Record<string, unknown>>;
+
+  return void res.json(rows.map((r) => parseRow(r)));
+});
+
+// GET /api/agents/schedules/:agentId/prompt — return snapshot + drift state
+app.get('/api/agents/schedules/:agentId/prompt', requireLocal, (req: Request, res: Response) => {
+  const { agentId } = req.params;
+  const schedule = loadSchedule(agentId);
+  if (!schedule) return void res.status(404).json({ error: 'schedule_not_found' });
+  const built = buildScheduledPrompt(agentId);
+  const currentTemplate = built.prompt || '';
+  const promptSnapshot = (schedule.promptSnapshot as string | undefined) ?? '';
+  const promptSnapshotAt = (schedule.promptSnapshotAt as string | undefined) ?? null;
+  const driftDetected = Boolean(currentTemplate) && currentTemplate !== promptSnapshot;
+  return void res.json({ promptSnapshot, promptSnapshotAt, currentTemplate, driftDetected, buildReason: built.reason ?? null });
+});
+
+// POST /api/agents/schedules/:agentId/rebuild — recreate trigger with current template
+app.post('/api/agents/schedules/:agentId/rebuild', requireLocal, async (req: Request, res: Response) => {
+  const { agentId } = req.params;
+  const schedule = loadSchedule(agentId);
+  if (!schedule) return void res.status(404).json({ error: 'schedule_not_found' });
+
+  const built = buildScheduledPrompt(agentId);
+  if (!built.prompt) return void res.status(400).json({ error: `cannot_build_prompt:${built.reason}` });
+
+  const oldTriggerId = schedule.triggerId as string | undefined;
+  if (oldTriggerId) {
+    await new Promise<void>((resolve) => {
+      exec(`claude schedule delete ${oldTriggerId}`, { shell: 'cmd.exe', cwd: PROJECT_DIR }, () => resolve());
+    });
+  }
+
+  const safePrompt = built.prompt.replace(/%/g, '%%').replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
+  const scheduleCmd = `claude schedule create --name "${String(agentId).replace(/"/g, '')}" --cron "${schedule.cronExpression}" --prompt "${safePrompt}"`;
+
+  exec(scheduleCmd, { shell: 'cmd.exe', cwd: PROJECT_DIR }, (err, stdout) => {
+    if (err) return void res.status(500).json({ error: `rebuild_failed: ${err.message}` });
+
+    let newTriggerId = '';
+    const idMatch = stdout.match(/(?:trigger[_\s-]?id|id)[:\s]+([a-zA-Z0-9_-]+)/i);
+    if (idMatch) newTriggerId = idMatch[1];
+    else newTriggerId = `splan-${agentId}-${Date.now().toString(36)}`;
+
+    ensureSplanDir();
+    const schedules = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
+    const nowIso = new Date().toISOString();
+    schedules[agentId] = {
+      ...schedule,
+      triggerId: newTriggerId,
+      promptSnapshot: built.prompt,
+      promptSnapshotAt: nowIso,
+      cliOutput: stdout.trim(),
+    };
+    fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+    return void res.json({ rebuilt: true, triggerId: newTriggerId, promptSnapshotAt: nowIso });
+  });
+});
+
 // ─── Scheduled-agent work broker (Phase 4) ──────────────────────────────────
 // Cron-fired Claude hits /inputs to receive preflight + work payload, then
 // /results to post findings. Railway is a pure data broker — no LLM calls.

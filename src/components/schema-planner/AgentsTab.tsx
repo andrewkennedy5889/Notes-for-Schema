@@ -58,6 +58,31 @@ interface AgentResult {
   completedAt?: number;
 }
 
+interface ScheduledRunRow {
+  runId: string;
+  agentId: string;
+  scheduledAt: string;
+  firedAt: string;
+  completedAt: string | null;
+  status: "success" | "skipped" | "failed" | "pending";
+  skippedReason?: string | null;
+  durationMs: number | null;
+  promptChars: number | null;
+  inputChars: number | null;
+  resultChars: number | null;
+  estimatedTokens: number | null;
+  resultJson?: unknown;
+  toolCallsJson?: unknown;
+}
+
+interface PromptInspection {
+  promptSnapshot: string;
+  promptSnapshotAt: string | null;
+  currentTemplate: string;
+  driftDetected: boolean;
+  buildReason: string | null;
+}
+
 // ─── Agent definitions ───────────────────────────────────────────────────────
 
 const ENTITY_TYPE_OPTIONS = ["feature", "module", "table", "field", "concept"];
@@ -357,13 +382,27 @@ export default function AgentsTab() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [results, setResults] = useState<Record<string, AgentResult>>({});
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [scheduledRuns, setScheduledRuns] = useState<ScheduledRunRow[]>([]);
 
-  // Load config + history + schedules on mount
+  const refreshScheduledRuns = useCallback(() => {
+    fetch("/api/agents/scheduled-runs?limit=200")
+      .then((r) => r.json())
+      .then((rows: ScheduledRunRow[]) => setScheduledRuns(Array.isArray(rows) ? rows : []))
+      .catch(() => {});
+  }, []);
+
+  // Load config + history + schedules + scheduled runs on mount
   useEffect(() => {
     fetch("/api/agents/config").then((r) => r.json()).then(setConfigs).catch(() => {});
     fetch("/api/agents/history").then((r) => r.json()).then(setHistory).catch(() => {});
     fetch("/api/agents/schedules").then((r) => r.json()).then(setSchedules).catch(() => {});
-  }, []);
+    refreshScheduledRuns();
+  }, [refreshScheduledRuns]);
+
+  // Stale-schema banner: any overnight skipped-due-to-schema_stale runs
+  const staleSchemaSkipped = scheduledRuns.filter(
+    (r) => r.status === "skipped" && r.skippedReason === "schema_stale",
+  );
 
   // Fetch results for history entries when panel opens
   const fetchedRef = useRef(new Set<string>());
@@ -532,10 +571,23 @@ export default function AgentsTab() {
           </button>
         )}
       </div>
-      <p className="text-xs mb-6" style={{ color: "var(--color-text-muted)" }}>
+      <p className="text-xs mb-4" style={{ color: "var(--color-text-muted)" }}>
         Launch a Claude Code terminal pre-loaded with a specialized prompt.
         Click a prompt label to view and edit the prompt before launching.
       </p>
+
+      {staleSchemaSkipped.length > 0 && (
+        <div
+          className="text-xs rounded px-3 py-2 mb-4"
+          style={{
+            backgroundColor: "rgba(242,182,97,0.12)",
+            color: "#f2b661",
+            border: "1px solid rgba(242,182,97,0.25)",
+          }}
+        >
+          {staleSchemaSkipped.length} scheduled run(s) skipped due to schema mismatch. Deploy the latest schema to fix.
+        </div>
+      )}
 
       {historyOpen && (
         <HistoryPanel
@@ -546,8 +598,8 @@ export default function AgentsTab() {
         />
       )}
 
-      <TierSection tier={1} agents={tier1} configs={configs} schedules={schedules} launching={launching} flash={flash} onLaunch={launch} onSaveConfigs={saveConfigs} onSaveSchedule={saveSchedule} onRemoveSchedule={removeSchedule} />
-      <TierSection tier={2} agents={tier2} configs={configs} schedules={schedules} launching={launching} flash={flash} onLaunch={launch} onSaveConfigs={saveConfigs} onSaveSchedule={saveSchedule} onRemoveSchedule={removeSchedule} />
+      <TierSection tier={1} agents={tier1} configs={configs} schedules={schedules} scheduledRuns={scheduledRuns} launching={launching} flash={flash} onLaunch={launch} onSaveConfigs={saveConfigs} onSaveSchedule={saveSchedule} onRemoveSchedule={removeSchedule} onRefreshScheduledRuns={refreshScheduledRuns} />
+      <TierSection tier={2} agents={tier2} configs={configs} schedules={schedules} scheduledRuns={scheduledRuns} launching={launching} flash={flash} onLaunch={launch} onSaveConfigs={saveConfigs} onSaveSchedule={saveSchedule} onRemoveSchedule={removeSchedule} onRefreshScheduledRuns={refreshScheduledRuns} />
     </div>
   );
 }
@@ -555,18 +607,20 @@ export default function AgentsTab() {
 // ─── Tier section ────────────────────────────────────────────────────────────
 
 function TierSection({
-  tier, agents, configs, schedules, launching, flash, onLaunch, onSaveConfigs, onSaveSchedule, onRemoveSchedule,
+  tier, agents, configs, schedules, scheduledRuns, launching, flash, onLaunch, onSaveConfigs, onSaveSchedule, onRemoveSchedule, onRefreshScheduledRuns,
 }: {
   tier: 1 | 2;
   agents: AgentDef[];
   configs: Record<string, PromptConfig>;
   schedules: Record<string, ScheduleConfig>;
+  scheduledRuns: ScheduledRunRow[];
   launching: string | null;
   flash: { key: string; ok: boolean; msg: string } | null;
   onLaunch: (agent: AgentDef, promptIdx: number, finalPrompt: string, paramValues: Record<string, string>) => void;
   onSaveConfigs: (next: Record<string, PromptConfig>) => void;
   onSaveSchedule: (agentId: string, config: ScheduleConfig, agent: AgentDef, promptIdx: number) => void;
   onRemoveSchedule: (agentId: string) => void;
+  onRefreshScheduledRuns: () => void;
 }) {
   const t = TIER_LABELS[tier];
   return (
@@ -581,7 +635,20 @@ function TierSection({
       </div>
       <div className="flex flex-col gap-4">
         {agents.map((agent) => (
-          <AgentCard key={agent.id} agent={agent} configs={configs} schedule={schedules[agent.id]} launching={launching} flash={flash} onLaunch={onLaunch} onSaveConfigs={onSaveConfigs} onSaveSchedule={onSaveSchedule} onRemoveSchedule={onRemoveSchedule} />
+          <AgentCard
+            key={agent.id}
+            agent={agent}
+            configs={configs}
+            schedule={schedules[agent.id]}
+            agentRuns={scheduledRuns.filter((r) => r.agentId === agent.id)}
+            launching={launching}
+            flash={flash}
+            onLaunch={onLaunch}
+            onSaveConfigs={onSaveConfigs}
+            onSaveSchedule={onSaveSchedule}
+            onRemoveSchedule={onRemoveSchedule}
+            onRefreshScheduledRuns={onRefreshScheduledRuns}
+          />
         ))}
       </div>
     </div>
@@ -591,19 +658,27 @@ function TierSection({
 // ─── Agent card ──────────────────────────────────────────────────────────────
 
 function AgentCard({
-  agent, configs, schedule, launching, flash, onLaunch, onSaveConfigs, onSaveSchedule, onRemoveSchedule,
+  agent, configs, schedule, agentRuns, launching, flash, onLaunch, onSaveConfigs, onSaveSchedule, onRemoveSchedule, onRefreshScheduledRuns,
 }: {
   agent: AgentDef;
   configs: Record<string, PromptConfig>;
   schedule?: ScheduleConfig;
+  agentRuns: ScheduledRunRow[];
   launching: string | null;
   flash: { key: string; ok: boolean; msg: string } | null;
   onLaunch: (agent: AgentDef, promptIdx: number, finalPrompt: string, paramValues: Record<string, string>) => void;
   onSaveConfigs: (next: Record<string, PromptConfig>) => void;
   onSaveSchedule: (agentId: string, config: ScheduleConfig, agent: AgentDef, promptIdx: number) => void;
   onRemoveSchedule: (agentId: string) => void;
+  onRefreshScheduledRuns: () => void;
 }) {
   const schedFlash = flash?.key === `sched-${agent.id}` ? flash : null;
+
+  const last30Days = agentRuns.filter((r) => Date.parse(r.firedAt) > Date.now() - 30 * 86400 * 1000);
+  const totalEstTokens = last30Days.reduce((a, r) => a + (r.estimatedTokens ?? 0), 0);
+  const avgEstTokens = last30Days.length > 0 ? Math.round(totalEstTokens / last30Days.length) : 0;
+  const showRunsPanel = agent.schedulable && agentRuns.length > 0;
+
   return (
     <div className="rounded-lg border px-5 py-4" style={{ borderColor: "var(--color-divider)", backgroundColor: "var(--color-surface)" }}>
       <div className="flex items-center gap-3 mb-2">
@@ -632,6 +707,12 @@ function AgentCard({
           />
         ))}
       </div>
+      {agent.schedulable && last30Days.length > 0 && (
+        <div className="text-[11px] mt-3 mb-1" style={{ color: "var(--color-text-muted)" }}>
+          Last 30 days: {last30Days.length} run{last30Days.length === 1 ? "" : "s"} · ~{totalEstTokens.toLocaleString()} est. tokens
+          {avgEstTokens > 0 && <> · avg ~{avgEstTokens.toLocaleString()}/run</>}
+        </div>
+      )}
       {agent.schedulable && (
         <SchedulePanel
           agent={agent}
@@ -639,8 +720,10 @@ function AgentCard({
           flash={schedFlash}
           onSave={(config) => onSaveSchedule(agent.id, config, agent, 0)}
           onRemove={() => onRemoveSchedule(agent.id)}
+          onRefreshRuns={onRefreshScheduledRuns}
         />
       )}
+      {showRunsPanel && <ScheduledRunHistory runs={agentRuns} onRefresh={onRefreshScheduledRuns} />}
     </div>
   );
 }
@@ -763,16 +846,51 @@ function PromptRow({
 // ─── Schedule panel ─────────────────────────────────────────────────────────
 
 function SchedulePanel({
-  agent, schedule, flash, onSave, onRemove,
+  agent, schedule, flash, onSave, onRemove, onRefreshRuns,
 }: {
   agent: AgentDef;
   schedule?: ScheduleConfig;
   flash: { key: string; ok: boolean; msg: string } | null;
   onSave: (config: ScheduleConfig) => void;
   onRemove: () => void;
+  onRefreshRuns: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [inspecting, setInspecting] = useState<PromptInspection | null>(null);
+  const [inspectError, setInspectError] = useState<string | null>(null);
+  const [rebuilding, setRebuilding] = useState(false);
+
+  const openInspector = async () => {
+    setInspectError(null);
+    try {
+      const res = await fetch(`/api/agents/schedules/${agent.id}/prompt`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'fetch_failed' }));
+        setInspectError(data.error || 'Failed to load prompt');
+        return;
+      }
+      const data = (await res.json()) as PromptInspection;
+      setInspecting(data);
+    } catch (e) {
+      setInspectError((e as Error).message);
+    }
+  };
+  const rebuild = async () => {
+    setRebuilding(true);
+    try {
+      const res = await fetch(`/api/agents/schedules/${agent.id}/rebuild`, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'rebuild_failed' }));
+        setInspectError(data.error || 'Rebuild failed');
+      } else {
+        await openInspector();
+        onRefreshRuns();
+      }
+    } finally {
+      setRebuilding(false);
+    }
+  };
   const promptDef = agent.prompts[0];
   const hasParams = promptDef.params && promptDef.params.length > 0;
 
@@ -964,7 +1082,7 @@ function SchedulePanel({
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={handleSave}
               disabled={saving}
@@ -983,7 +1101,30 @@ function SchedulePanel({
                 {saving ? "Removing\u2026" : "Remove Schedule"}
               </button>
             )}
+            {schedule?.enabled && (
+              <button
+                onClick={openInspector}
+                className="px-3 py-1.5 text-[11px] font-medium rounded transition-colors"
+                style={{ backgroundColor: "rgba(66,139,202,0.12)", color: "#428bca" }}
+              >
+                Inspect prompt
+              </button>
+            )}
           </div>
+        </div>
+      )}
+      {inspecting && (
+        <PromptInspectorModal
+          data={inspecting}
+          onClose={() => setInspecting(null)}
+          onRebuild={rebuild}
+          rebuilding={rebuilding}
+          error={inspectError}
+        />
+      )}
+      {!inspecting && inspectError && (
+        <div className="text-[11px] mt-2 px-2 py-1 rounded" style={{ backgroundColor: "rgba(224,85,85,0.12)", color: "#e05555" }}>
+          {inspectError}
         </div>
       )}
     </div>
@@ -1240,6 +1381,183 @@ function ManualResultForm({
         <button onClick={onCancel} className="px-3 py-1 text-[11px] rounded transition-colors hover:bg-white/5" style={{ color: "var(--color-text-muted)" }}>
           Cancel
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Scheduled run history (Phase 8) ────────────────────────────────────────
+
+function ScheduledRunHistory({ runs, onRefresh }: { runs: ScheduledRunRow[]; onRefresh: () => void }) {
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+
+  const statusColor = (status: ScheduledRunRow['status']): string => {
+    if (status === 'success') return '#4ecb71';
+    if (status === 'failed') return '#e05555';
+    if (status === 'skipped') return '#f2b661';
+    return '#9aa3b2';
+  };
+
+  const relTime = (iso: string): string => {
+    const diffMs = Date.now() - Date.parse(iso);
+    const s = Math.floor(diffMs / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    return `${d}d ago`;
+  };
+
+  return (
+    <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--color-divider)" }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: "var(--color-text-subtle)" }}>
+          Scheduled runs ({runs.length})
+        </span>
+        <button onClick={onRefresh} className="text-[10px] hover:underline" style={{ color: "#428bca" }}>
+          Refresh
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[10px]" style={{ color: "var(--color-text-muted)" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--color-divider)" }}>
+              <th className="text-left py-1 pr-2">Fired</th>
+              <th className="text-left py-1 pr-2">Status</th>
+              <th className="text-right py-1 pr-2">Dur</th>
+              <th className="text-right py-1 pr-2">Prompt</th>
+              <th className="text-right py-1 pr-2">Input</th>
+              <th className="text-right py-1 pr-2">Result</th>
+              <th className="text-right py-1 pr-2">Est. tokens</th>
+              <th className="text-left py-1">Summary</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.slice(0, 50).map((r) => {
+              const expanded = expandedRunId === r.runId;
+              const summary = typeof r.resultJson === 'object' && r.resultJson !== null
+                ? (r.resultJson as { summary?: string; error?: string }).summary ?? (r.resultJson as { error?: string }).error ?? ''
+                : '';
+              return (
+                <React.Fragment key={r.runId}>
+                  <tr
+                    onClick={() => setExpandedRunId(expanded ? null : r.runId)}
+                    style={{ borderBottom: "1px solid rgba(255,255,255,0.03)", cursor: "pointer" }}
+                  >
+                    <td className="py-1 pr-2" title={r.firedAt}>{relTime(r.firedAt)}</td>
+                    <td className="py-1 pr-2">
+                      <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", backgroundColor: statusColor(r.status), marginRight: 4 }} />
+                      {r.status}{r.skippedReason ? ` (${r.skippedReason})` : ""}
+                    </td>
+                    <td className="py-1 pr-2 text-right font-mono">{r.durationMs != null ? `${r.durationMs}ms` : '—'}</td>
+                    <td className="py-1 pr-2 text-right font-mono">{r.promptChars ?? '—'}</td>
+                    <td className="py-1 pr-2 text-right font-mono">{r.inputChars ?? '—'}</td>
+                    <td className="py-1 pr-2 text-right font-mono">{r.resultChars ?? '—'}</td>
+                    <td className="py-1 pr-2 text-right font-mono">{r.estimatedTokens?.toLocaleString() ?? '—'}</td>
+                    <td className="py-1 truncate" style={{ maxWidth: 200 }}>{summary || '—'}</td>
+                  </tr>
+                  {expanded && (
+                    <tr style={{ backgroundColor: "rgba(0,0,0,0.15)" }}>
+                      <td colSpan={8} className="py-2 px-3">
+                        <div className="font-mono text-[10px] whitespace-pre-wrap break-all" style={{ color: "var(--color-text)" }}>
+                          runId: {r.runId}
+                          {r.resultJson ? `\nresult: ${JSON.stringify(r.resultJson, null, 2)}` : ''}
+                          {r.toolCallsJson ? `\ntoolCalls: ${JSON.stringify(r.toolCallsJson, null, 2)}` : ''}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── Prompt inspector modal (Phase 8) ───────────────────────────────────────
+
+function PromptInspectorModal({
+  data, onClose, onRebuild, rebuilding, error,
+}: {
+  data: PromptInspection;
+  onClose: () => void;
+  onRebuild: () => void;
+  rebuilding: boolean;
+  error: string | null;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: "rgba(0,0,0,0.6)" }}
+      onClick={onClose}
+    >
+      <div
+        className="rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col"
+        style={{ backgroundColor: "var(--color-surface)", border: "1px solid var(--color-divider)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: "1px solid var(--color-divider)" }}>
+          <div>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>Scheduled agent prompt</h3>
+            <p className="text-[11px]" style={{ color: "var(--color-text-muted)" }}>
+              Snapshot: {data.promptSnapshotAt ? new Date(data.promptSnapshotAt).toLocaleString() : '—'}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-xs px-2 py-1 rounded hover:bg-white/5" style={{ color: "var(--color-text-muted)" }}>
+            Close
+          </button>
+        </div>
+        {data.driftDetected && (
+          <div className="px-4 py-2 flex items-center justify-between" style={{ backgroundColor: "rgba(242,182,97,0.12)", color: "#f2b661" }}>
+            <span className="text-[11px]">This schedule&rsquo;s prompt is out of date. Rebuild to sync with the current template.</span>
+            <button
+              onClick={onRebuild}
+              disabled={rebuilding}
+              className="text-[11px] font-medium px-2 py-1 rounded"
+              style={{ backgroundColor: "rgba(242,182,97,0.2)", opacity: rebuilding ? 0.5 : 1 }}
+            >
+              {rebuilding ? 'Rebuilding…' : 'Rebuild schedule'}
+            </button>
+          </div>
+        )}
+        {error && (
+          <div className="px-4 py-2 text-[11px]" style={{ backgroundColor: "rgba(224,85,85,0.12)", color: "#e05555" }}>
+            {error}
+          </div>
+        )}
+        <div className="flex-1 overflow-auto p-4 space-y-4">
+          <div>
+            <label className="text-[10px] font-semibold uppercase tracking-wider block mb-1" style={{ color: "var(--color-text-subtle)" }}>
+              Snapshot (what Claude receives)
+            </label>
+            <textarea
+              value={data.promptSnapshot}
+              readOnly
+              rows={12}
+              className="w-full px-2 py-1.5 text-[11px] rounded border font-mono resize-y"
+              style={{ backgroundColor: "var(--color-bg)", borderColor: "var(--color-divider)", color: "var(--color-text)" }}
+            />
+          </div>
+          {data.driftDetected && (
+            <div>
+              <label className="text-[10px] font-semibold uppercase tracking-wider block mb-1" style={{ color: "var(--color-text-subtle)" }}>
+                Current template (in code)
+              </label>
+              <textarea
+                value={data.currentTemplate}
+                readOnly
+                rows={12}
+                className="w-full px-2 py-1.5 text-[11px] rounded border font-mono resize-y"
+                style={{ backgroundColor: "var(--color-bg)", borderColor: "var(--color-divider)", color: "var(--color-text)" }}
+              />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
