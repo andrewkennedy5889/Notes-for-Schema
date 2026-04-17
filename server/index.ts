@@ -1492,16 +1492,55 @@ app.get('/api/agents/schedules', (_req: Request, res: Response) => {
   return void res.json(readJson<Record<string, unknown>>(AGENT_SCHEDULES_FILE, {}));
 });
 
+// Resolve the remote URL cron-Claude will call back into. Prefer an explicit
+// override env so a user can point at a staging Railway without touching the
+// existing SYNC_REMOTE_URL used by the data-sync system.
+function getScheduledRemoteUrl(): string | null {
+  const url = process.env.SCHEDULED_AGENT_REMOTE_URL ?? process.env.SYNC_REMOTE_URL ?? null;
+  return url ? url.replace(/\/+$/, '') : null;
+}
+
+function buildScheduledPrompt(agentId: string): { prompt: string; reason?: string } {
+  const def = getScheduledAgent(agentId);
+  if (!def) return { prompt: '', reason: 'no_handler' };
+  const url = getScheduledRemoteUrl();
+  if (!url) return { prompt: '', reason: 'remote_url_not_configured' };
+  const token = process.env.SCHEDULED_AGENT_TOKEN;
+  if (!token) return { prompt: '', reason: 'token_not_configured' };
+  const prompt = def.promptTemplate
+    .replace(/\{RAILWAY_URL\}/g, url)
+    .replace(/\{SCHEDULED_AGENT_TOKEN\}/g, token);
+  return { prompt };
+}
+
 // POST /api/agents/schedules — create or update a schedule via claude CLI
 app.post('/api/agents/schedules', async (req: Request, res: Response) => {
-  const { agentId, agentName, config, prompt } = req.body as {
+  const { agentId, agentName, config, prompt: clientPrompt } = req.body as {
     agentId?: string;
     agentName?: string;
     config?: { cronExpression: string; cronLabel: string; promptOverride?: string; paramDefaults?: Record<string, string>; triggerId?: string };
     prompt?: string;
   };
-  if (!agentId || !config?.cronExpression || !prompt) {
-    return void res.status(400).json({ error: 'agentId, config.cronExpression, and prompt are required' });
+  if (!agentId || !config?.cronExpression) {
+    return void res.status(400).json({ error: 'agentId and config.cronExpression are required' });
+  }
+
+  // For registered scheduled agents, the prompt is built server-side from the
+  // code template. The client-supplied prompt is ignored — the code is the
+  // source of truth so promptSnapshot is reviewable and drift-detectable.
+  let prompt: string;
+  const isScheduledAgent = !!getScheduledAgent(agentId);
+  if (isScheduledAgent) {
+    const built = buildScheduledPrompt(agentId);
+    if (!built.prompt) {
+      return void res.status(400).json({ error: `cannot_build_prompt:${built.reason}` });
+    }
+    prompt = built.prompt;
+  } else {
+    if (!clientPrompt) {
+      return void res.status(400).json({ error: 'prompt is required for non-scheduled-registry agents' });
+    }
+    prompt = clientPrompt;
   }
 
   // If updating, remove the old trigger first
@@ -1552,6 +1591,8 @@ app.post('/api/agents/schedules', async (req: Request, res: Response) => {
       cliOutput: stdout.trim(),
       expectedSchemaFingerprint: computeSchemaFingerprint(),
       pinnedAt: nowIso,
+      promptSnapshot: prompt,
+      promptSnapshotAt: nowIso,
     };
     fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
 

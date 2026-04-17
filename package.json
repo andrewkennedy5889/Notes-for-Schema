@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "seed": "tsx server/seed.ts",
     "start": "NODE_ENV=production tsx server/index.ts",
-    "mcp": "tsx mcp-server/index.ts"
+    "mcp": "tsx mcp-server/index.ts",
+    "migrate-schedules-v2": "node scripts/migrate-schedules-v2.mjs"
   },
   "keywords": [],
   "author": "",
