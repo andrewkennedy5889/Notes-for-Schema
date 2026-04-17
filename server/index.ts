@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from './db.js';
@@ -2208,8 +2208,7 @@ app.get('/api/sync/last-attempt', (_req: Request, res: Response) => {
 // Drives the "N commits ahead — will push on next Deploy" indicator. Local-only; returns zeros on hosted.
 app.get('/api/sync/local-git-status', requireLocal, (_req: Request, res: Response) => {
   const PROJECT_ROOT = path.join(__dirname, '..');
-  const opts = { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'ignore'] as const };
-  const execSync = require('child_process').execSync as (cmd: string, o: typeof opts) => Buffer;
+  const opts = { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'ignore'] as ['ignore', 'pipe', 'ignore'] };
 
   let commitsAhead = 0;
   let dirty = false;
@@ -2237,7 +2236,7 @@ app.get('/api/sync/last-deploy', (_req: Request, res: Response) => {
   let repoUrl: string | null = null;
   try {
     const PROJECT_ROOT = path.join(__dirname, '..');
-    const remoteOut = require('child_process').execSync('git remote get-url origin', { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    const remoteOut = execSync('git remote get-url origin', { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
     const match = remoteOut.match(/github\.com[/:](.+?)(?:\.git)?$/);
     if (match) repoUrl = `https://github.com/${match[1]}`;
   } catch { /* no git or not github — leave null */ }
@@ -2298,7 +2297,7 @@ app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) =>
     const ghConfig = JSON.parse(fs.readFileSync(ghConfigPath, 'utf-8'));
     if (ghConfig.pat) {
       // Build authenticated push URL from remote origin
-      const remoteUrl = require('child_process').execSync('git remote get-url origin', { cwd: PROJECT_ROOT }).toString().trim();
+      const remoteUrl = execSync('git remote get-url origin', { cwd: PROJECT_ROOT }).toString().trim();
       const match = remoteUrl.match(/github\.com[/:](.+?)(?:\.git)?$/);
       if (match) {
         pushCmd = `git push https://${ghConfig.pat}@github.com/${match[1]}.git HEAD:main`;
