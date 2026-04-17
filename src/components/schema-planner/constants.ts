@@ -301,7 +301,7 @@ export const TAB_DEPS: Record<string, string[]> = {
   feature_concerns: ["features"],
   data_access_rules: ["data_tables"],
   data_reviews: ["features"],
-  concepts: ["features", "modules", "data_tables", "code_changes", "projects", "research"],
+  concepts: ["features", "modules", "data_tables", "data_fields", "code_changes", "projects", "research"],
   research: ["concepts"],
   projects: ["modules", "features", "concepts", "data_tables", "data_fields"],
   code_changes: ["projects"],

@@ -1392,6 +1392,60 @@ app.delete('/api/agents/schedules/:agentId', (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/db-export — bulk export all tables ────────────────────────────
+app.get('/api/db-export', (_req: Request, res: Response) => {
+  const db = getDb();
+  const SKIP_TABLES = new Set(['_splan_all_tests', '_splan_grouping_presets']);
+
+  const tableRows = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_splan_%' ORDER BY name"
+  ).all() as Array<{ name: string }>;
+
+  const tables: Record<string, unknown[]> = {};
+  for (const { name } of tableRows) {
+    if (SKIP_TABLES.has(name)) continue;
+    tables[name] = db.prepare(`SELECT * FROM ${name}`).all();
+  }
+
+  return void res.json({ tables });
+});
+
+// ─── GET /api/sync-status — changes since last sync ─────────────────────────
+app.get('/api/sync-status', (_req: Request, res: Response) => {
+  const db = getDb();
+
+  // Get last sync record
+  const lastSync = db.prepare(
+    'SELECT * FROM _splan_sync_meta ORDER BY synced_at DESC LIMIT 1'
+  ).get() as { id: number; sync_direction: string; remote_url: string; synced_at: string; rows_synced: number } | undefined;
+
+  if (!lastSync) {
+    return void res.json({ lastSync: null, changesSinceSync: [], changeCount: 0 });
+  }
+
+  // Get change_log entries since last sync
+  const changes = db.prepare(
+    `SELECT entity_type, entity_id, action, field_changed, new_value, changed_at
+     FROM _splan_change_log
+     WHERE changed_at > ?
+     ORDER BY changed_at DESC`
+  ).all(lastSync.synced_at) as Array<{
+    entity_type: string; entity_id: number; action: string;
+    field_changed: string | null; new_value: string | null; changed_at: string;
+  }>;
+
+  return void res.json({
+    lastSync: {
+      direction: lastSync.sync_direction,
+      remoteUrl: lastSync.remote_url,
+      syncedAt: lastSync.synced_at,
+      rowsSynced: lastSync.rows_synced,
+    },
+    changesSinceSync: changes.slice(0, 50), // cap at 50 for readability
+    changeCount: changes.length,
+  });
+});
+
 // ─── POST /api/db-import — bulk import all tables ───────────────────────────
 app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: Response) => {
   const { tables } = req.body as { tables: Record<string, Record<string, unknown>[]> };
@@ -1489,6 +1543,13 @@ app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: 
   } finally {
     db.pragma('foreign_keys = ON');
   }
+
+  // Record sync metadata
+  const totalImported = Object.values(imported).reduce((a, b) => a + b, 0);
+  const remoteUrl = req.headers['x-sync-source'] as string || 'unknown';
+  db.prepare(
+    'INSERT INTO _splan_sync_meta (sync_direction, remote_url, rows_synced) VALUES (?, ?, ?)'
+  ).run('push', remoteUrl, totalImported);
 
   return void res.json({ success: true, imported });
 });

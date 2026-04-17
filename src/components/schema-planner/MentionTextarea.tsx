@@ -16,15 +16,15 @@ import { TablePasteModal } from "./TablePasteModal";
 import { InlineTableGrid } from "./InlineTableGrid";
 
 interface MentionOption {
-  type: "table" | "field" | "image" | "module" | "feature" | "concept";
+  type: "table" | "field" | "image" | "module" | "feature" | "concept" | "research";
   id: number;
   label: string;       // display name
   parentLabel?: string; // table name for fields, module names for features
   imageId?: string;     // string ID for images
 }
 
-type MentionType = "table" | "field" | "module" | "feature" | "image" | "concept";
-const ALL_MENTION_TYPES = new Set<MentionType>(["table", "field", "module", "feature", "image", "concept"]);
+type MentionType = "table" | "field" | "module" | "feature" | "image" | "concept" | "research";
+const ALL_MENTION_TYPES = new Set<MentionType>(["table", "field", "module", "feature", "image", "concept", "research"]);
 
 /** Escape HTML */
 function esc(s: string): string {
@@ -159,6 +159,7 @@ function buildHighlightHTML(
   tableTitles?: Map<string, string>,
   tableColorMap?: Map<string, string>,
   conceptDisplayNames?: Set<string>,
+  researchDisplayNames?: Set<string>,
 ): string {
   if (!text) return "\n";
 
@@ -211,6 +212,10 @@ function buildHighlightHTML(
       if (inner.startsWith("💡 ") && conceptDisplayNames?.has(inner.slice(3))) {
         const name = inner.slice(3);
         return `<span style="color:#f2b661;pointer-events:auto;cursor:pointer" data-ref-type="concept" data-ref-name="${esc(name)}">(${inner})</span>`;
+      }
+      if (inner.startsWith("🔬 ") && researchDisplayNames?.has(inner.slice(3))) {
+        const name = inner.slice(3);
+        return `<span style="color:#5bc0de;pointer-events:auto;cursor:pointer" data-ref-type="research" data-ref-name="${esc(name)}">(${inner})</span>`;
       }
       if (inner === "deleted") return `<span style="color:#e05555;text-decoration:line-through">(deleted)</span>`;
       // Deleted refs with last-known name: (⚠name) or (⚠🎨 title)
@@ -317,6 +322,8 @@ export function MentionTextarea({
   featureDisplayNames,
   concepts,
   conceptDisplayNames,
+  research,
+  researchDisplayNames,
   placeholder,
   rows = 15,
   onRefNavigate,
@@ -347,6 +354,8 @@ export function MentionTextarea({
   featureDisplayNames?: Set<string>;
   concepts?: Array<{ id: number; name: string }>;
   conceptDisplayNames?: Set<string>;
+  research?: Array<{ id: number; name: string }>;
+  researchDisplayNames?: Set<string>;
   placeholder?: string;
   rows?: number;
   onRefNavigate?: (type: string, name: string) => void;
@@ -1104,8 +1113,8 @@ export function MentionTextarea({
 
   // Highlight HTML — same text as textarea, with formatting from ranges + reference coloring
   const highlightHTML = useMemo(
-    () => buildHighlightHTML(value, fmtRanges, tableNames, fieldDisplayNames, imageDisplayNames, collapsedKeys, moduleDisplayNames, featureDisplayNames, tableTitles, tableColorMap, conceptDisplayNames),
-    [value, fmtRanges, tableNames, fieldDisplayNames, imageDisplayNames, collapsedKeys, moduleDisplayNames, featureDisplayNames, tableTitles, tableColorMap, conceptDisplayNames]
+    () => buildHighlightHTML(value, fmtRanges, tableNames, fieldDisplayNames, imageDisplayNames, collapsedKeys, moduleDisplayNames, featureDisplayNames, tableTitles, tableColorMap, conceptDisplayNames, researchDisplayNames),
+    [value, fmtRanges, tableNames, fieldDisplayNames, imageDisplayNames, collapsedKeys, moduleDisplayNames, featureDisplayNames, tableTitles, tableColorMap, conceptDisplayNames, researchDisplayNames]
   );
 
   // refBtnTick removed — highlightHTML and taScrollTop already trigger re-renders naturally
@@ -1145,8 +1154,12 @@ export function MentionTextarea({
       .filter((con) => con.name.toLowerCase().includes(q))
       .slice(0, perType)
       .map((con) => ({ type: "concept" as const, id: con.id, label: con.name })) : [];
-    return [...mOpts, ...feOpts, ...cOpts, ...tOpts, ...fOpts, ...iOpts];
-  }, [query, tables, fields, images, modules, features, concepts, imageOnlyMode, activeTypes]);
+    const rOpts: MentionOption[] = activeTypes.has("research") ? (research || [])
+      .filter((res) => res.name.toLowerCase().includes(q))
+      .slice(0, perType)
+      .map((res) => ({ type: "research" as const, id: res.id, label: res.name })) : [];
+    return [...mOpts, ...feOpts, ...cOpts, ...rOpts, ...tOpts, ...fOpts, ...iOpts];
+  }, [query, tables, fields, images, modules, features, concepts, research, imageOnlyMode, activeTypes]);
 
   // Track previous value for range adjustment
   const prevValueRef = useRef(value);
@@ -1293,6 +1306,8 @@ export function MentionTextarea({
         ? `(⚡ ${opt.label})`
         : opt.type === "concept"
         ? `(💡 ${opt.label})`
+        : opt.type === "research"
+        ? `(🔬 ${opt.label})`
         : `(${opt.parentLabel}.${opt.label})`;
       const before = value.slice(0, triggerIdx);
       const after = value.slice(ta.selectionStart);
@@ -2194,7 +2209,7 @@ export function MentionTextarea({
           const adjustedTop = top - taScrollTop;
           const taHeight = highlightRef.current?.clientHeight ?? 400;
           if (adjustedTop < -10 || adjustedTop > taHeight) return null;
-          const color = type === "module" ? "#e67d4a" : type === "feature" ? "#a855f7" : type === "field" ? "#5bc0de" : "#a855f7";
+          const color = type === "module" ? "#e67d4a" : type === "feature" ? "#a855f7" : type === "field" ? "#5bc0de" : type === "concept" ? "#f2b661" : type === "research" ? "#5bc0de" : "#a855f7";
           return (
             <button
               key={`ref-btn-${i}-${type}-${name}`}

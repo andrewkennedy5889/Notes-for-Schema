@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import { rawToDisplay } from "./text-utils";
 
 interface RefSummaryPopupProps {
-  type: "module" | "feature" | "table";
+  type: "module" | "feature" | "table" | "concept" | "research";
   record: Record<string, unknown>;
   features?: Record<string, unknown>[]; // all features (for module → feature list)
   tables: Array<{ id: number; name: string }>;
@@ -12,6 +12,7 @@ interface RefSummaryPopupProps {
   allFields?: Record<string, unknown>[]; // full field records for table view
   modules?: Array<{ id: number; name: string }>;
   allFeatures?: Array<{ id: number; name: string }>;
+  allConcepts?: Array<{ id: number; name: string }>;
   highlightFieldName?: string; // highlight a specific field row when opened from a field ref
   onClose: () => void;
   onOpenFeature?: (featureRecord: Record<string, unknown>) => void;
@@ -29,6 +30,7 @@ export default function RefSummaryPopup({
   allFields,
   modules,
   allFeatures,
+  allConcepts,
   highlightFieldName,
   onClose,
   onOpenFeature,
@@ -38,8 +40,8 @@ export default function RefSummaryPopup({
   const [editingCell, setEditingCell] = useState<{ fieldId: number; col: string } | null>(null);
   const [pendingEdit, setPendingEdit] = useState<{ fieldRecord: Record<string, unknown>; col: string; oldValue: unknown; newValue: unknown } | null>(null);
 
-  const name = type === "module" ? String(record.moduleName ?? "") : type === "table" ? String(record.tableName ?? "") : String(record.featureName ?? "");
-  const description = type === "module" ? String(record.moduleDescription ?? "") : type === "table" ? String(record.descriptionPurpose ?? "") : String(record.description ?? "");
+  const name = type === "module" ? String(record.moduleName ?? "") : type === "table" ? String(record.tableName ?? "") : type === "concept" ? String(record.conceptName ?? "") : type === "research" ? String(record.title ?? "") : String(record.featureName ?? "");
+  const description = type === "module" ? String(record.moduleDescription ?? "") : type === "table" ? String(record.descriptionPurpose ?? "") : type === "concept" ? String(record.description ?? "") : type === "research" ? String(record.summary ?? "") : String(record.description ?? "");
   const purpose = type === "module" ? String(record.modulePurpose ?? "") : "";
 
   // For tables: get fields
@@ -71,6 +73,10 @@ export default function RefSummaryPopup({
     ? { bg: "rgba(230,125,74,0.15)", text: "#e67d4a", border: "rgba(230,125,74,0.3)" }
     : type === "table"
     ? { bg: "rgba(168,85,247,0.15)", text: "#a855f7", border: "rgba(168,85,247,0.3)" }
+    : type === "concept"
+    ? { bg: "rgba(242,182,97,0.15)", text: "#f2b661", border: "rgba(242,182,97,0.3)" }
+    : type === "research"
+    ? { bg: "rgba(91,192,222,0.15)", text: "#5bc0de", border: "rgba(91,192,222,0.3)" }
     : { bg: "rgba(168,85,247,0.15)", text: "#a855f7", border: "rgba(168,85,247,0.3)" };
 
   return (
@@ -82,7 +88,7 @@ export default function RefSummaryPopup({
             className="px-3 py-1 rounded text-xs font-bold uppercase"
             style={{ backgroundColor: badgeColor.bg, color: badgeColor.text, border: `1px solid ${badgeColor.border}` }}
           >
-            {type === "module" ? "Module" : type === "table" ? "Table" : "Feature"}
+            {type === "module" ? "Module" : type === "table" ? "Table" : type === "concept" ? "Concept" : type === "research" ? "Research" : "Feature"}
           </span>
           <span className="text-lg font-semibold flex-1" style={{ color: "var(--color-text)" }}>{name}</span>
           <button onClick={onClose} className="text-xl leading-none px-2 rounded hover:bg-black/10" style={{ color: "var(--color-text-muted)" }}>&times;</button>
@@ -182,6 +188,116 @@ export default function RefSummaryPopup({
 
           {type === "feature" && noteFields.length === 0 && !description && (
             <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>No description or notes yet.</p>
+          )}
+
+          {/* Concept: type, status, notes, linked features/modules */}
+          {type === "concept" && (
+            <>
+              {(record.conceptType || record.status) && (
+                <div className="flex items-center gap-2">
+                  {record.conceptType && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(242,182,97,0.15)", color: "#f2b661" }}>
+                      {String(record.conceptType)}
+                    </span>
+                  )}
+                  {record.status && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(78,203,113,0.15)", color: "#4ecb71" }}>
+                      {String(record.status)}
+                    </span>
+                  )}
+                </div>
+              )}
+              {record.notes && (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: "var(--color-text-muted)" }}>Notes</div>
+                  <pre className="text-base whitespace-pre-wrap rounded p-4" style={{ backgroundColor: "var(--color-surface)", color: "var(--color-text)", fontFamily: "inherit", lineHeight: 1.6 }}>
+                    {displayNote(String(record.notes))}
+                  </pre>
+                </div>
+              )}
+              {Array.isArray(record.features) && (record.features as number[]).length > 0 && (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: "var(--color-text-muted)" }}>
+                    Linked Features ({(record.features as number[]).length})
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(record.features as number[]).map((fid) => {
+                      const feat = allFeatures?.find((f) => f.id === fid);
+                      return (
+                        <span key={fid} className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(168,85,247,0.15)", color: "#a855f7" }}>
+                          {feat ? feat.name : `#${fid}`}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {Array.isArray(record.modules) && (record.modules as number[]).length > 0 && (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: "var(--color-text-muted)" }}>
+                    Linked Modules ({(record.modules as number[]).length})
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(record.modules as number[]).map((mid) => {
+                      const mod = modules?.find((m) => m.id === mid);
+                      return (
+                        <span key={mid} className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(230,125,74,0.15)", color: "#e67d4a" }}>
+                          {mod ? mod.name : `#${mid}`}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {!description && !record.notes && (
+                <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>No description or notes yet.</p>
+              )}
+            </>
+          )}
+
+          {/* Research: summary, findings, sources */}
+          {type === "research" && (
+            <>
+              {record.status && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(91,192,222,0.15)", color: "#5bc0de" }}>
+                    {String(record.status)}
+                  </span>
+                  {record.researchedAt && (
+                    <span className="text-[11px]" style={{ color: "var(--color-text-muted)" }}>
+                      Researched: {String(record.researchedAt).split("T")[0]}
+                    </span>
+                  )}
+                </div>
+              )}
+              {record.conceptId && (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: "var(--color-text-muted)" }}>Parent Concept</div>
+                  <span className="text-[11px] px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: "rgba(242,182,97,0.15)", color: "#f2b661" }}>
+                    {allConcepts?.find((c) => c.id === record.conceptId)?.name || `#${record.conceptId}`}
+                  </span>
+                </div>
+              )}
+              {record.findings && (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: "var(--color-text-muted)" }}>Findings</div>
+                  <pre className="text-base whitespace-pre-wrap rounded p-4" style={{ backgroundColor: "var(--color-surface)", color: "var(--color-text)", fontFamily: "inherit", lineHeight: 1.6 }}>
+                    {String(record.findings)}
+                  </pre>
+                </div>
+              )}
+              {record.sources && (
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide mb-1.5" style={{ color: "var(--color-text-muted)" }}>Sources</div>
+                  <pre className="text-sm whitespace-pre-wrap rounded p-3" style={{ backgroundColor: "var(--color-surface)", color: "var(--color-text)", fontFamily: "inherit" }}>
+                    {String(record.sources)}
+                  </pre>
+                </div>
+              )}
+              {!description && !record.findings && (
+                <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>No summary or findings yet.</p>
+              )}
+            </>
           )}
 
           {/* Table: field grid */}

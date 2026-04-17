@@ -975,7 +975,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
   const [moduleColUnderline, setModuleColUnderline] = usePersistedPreference<boolean>("splan_module_col_underline", true);
   const [featureColBold, setFeatureColBold] = usePersistedPreference<boolean>("splan_feature_col_bold", true);
   const [featureColUnderline, setFeatureColUnderline] = usePersistedPreference<boolean>("splan_feature_col_underline", true);
-  const [refSummaryPopup, setRefSummaryPopup] = useState<{ type: "module" | "feature" | "table"; record: Record<string, unknown>; highlightField?: string } | null>(null);
+  const [refSummaryPopup, setRefSummaryPopup] = useState<{ type: "module" | "feature" | "table" | "concept" | "research"; record: Record<string, unknown>; highlightField?: string } | null>(null);
   const [imageViewer, setImageViewer] = useState<{ url: string; title: string; x: number; y: number; width: number; height: number; zoom: number; originX: number; originY: number } | null>(null);
   const imageDrag = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
   const imageResize = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
@@ -1654,6 +1654,10 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
     (data.concepts || []).map((r) => ({ id: r.conceptId as number, name: String(r.conceptName) })),
     [data]
   );
+  const mentionResearch = useMemo(() =>
+    (data.research || []).map((r) => ({ id: r.researchId as number, name: String(r.title) })),
+    [data]
+  );
 
   // Resolvers for RichRefText and extractRefsFromNotes
   const resolveTableName = useCallback((id: number): string | null => {
@@ -1684,14 +1688,24 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
     const c = (data.concepts || []).find((r) => r.conceptId === id);
     return c ? String(c.conceptName) : null;
   }, [data]);
+  const resolveResearchName = useCallback((id: number): string | null => {
+    const r = (data.research || []).find((res) => res.researchId === id);
+    return r ? String(r.title) : null;
+  }, [data]);
 
-  const handleRefSummaryClick = useCallback((type: "module" | "feature" | "table" | "concept", name: string) => {
+  const handleRefSummaryClick = useCallback((type: "module" | "feature" | "table" | "concept" | "research", name: string) => {
     if (type === "module") {
       const mod = (data.modules || []).find((m) => String(m.moduleName) === name);
       if (mod) setRefSummaryPopup({ type: "module", record: mod as Record<string, unknown> });
     } else if (type === "table") {
       const tbl = (data.data_tables || []).find((t) => String(t.tableName) === name);
       if (tbl) setRefSummaryPopup({ type: "table", record: tbl as Record<string, unknown> });
+    } else if (type === "concept") {
+      const con = (data.concepts || []).find((c) => String(c.conceptName) === name);
+      if (con) setRefSummaryPopup({ type: "concept", record: con as Record<string, unknown> });
+    } else if (type === "research") {
+      const res = (data.research || []).find((r) => String(r.title) === name);
+      if (res) setRefSummaryPopup({ type: "research", record: res as Record<string, unknown> });
     } else {
       const feat = (data.features || []).find((f) => String(f.featureName) === name);
       if (feat) setRefSummaryPopup({ type: "feature", record: feat as Record<string, unknown> });
@@ -2664,7 +2678,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
           // Check for (t:ID) or (f:ID) references
           if (REF_REGEX.test(s)) {
             REF_REGEX.lastIndex = 0;
-            return <RichRefText text={s.length > 80 ? s.slice(0, 80) + "..." : s} resolveTable={resolveTableName} resolveField={resolveFieldName} fieldTableId={fieldTableIdLookup} resolveModule={resolveModuleName} resolveFeature={resolveFeatureName} resolveConcept={resolveConceptName} onRefClick={handleRefSummaryClick} />;
+            return <RichRefText text={s.length > 80 ? s.slice(0, 80) + "..." : s} resolveTable={resolveTableName} resolveField={resolveFieldName} fieldTableId={fieldTableIdLookup} resolveModule={resolveModuleName} resolveFeature={resolveFeatureName} resolveConcept={resolveConceptName} resolveResearch={resolveResearchName} onRefClick={handleRefSummaryClick} />;
           }
           return s.length > 60 ? s.slice(0, 60) + "..." : s;
         }
@@ -5167,6 +5181,12 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                         } else if (type === "feature") {
                           const feat = (data.features || []).find((f) => String(f.featureName) === name);
                           if (feat) setRefSummaryPopup({ type: "feature", record: feat as Record<string, unknown> });
+                        } else if (type === "concept") {
+                          const con = (data.concepts || []).find((c) => String(c.conceptName) === name);
+                          if (con) setRefSummaryPopup({ type: "concept", record: con as Record<string, unknown> });
+                        } else if (type === "research") {
+                          const res = (data.research || []).find((r) => String(r.title) === name);
+                          if (res) setRefSummaryPopup({ type: "research", record: res as Record<string, unknown> });
                         }
                       };
 
@@ -5204,6 +5224,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                     modules={mentionModules}
                                     features={mentionFeatures}
                                 concepts={mentionConcepts}
+                                research={mentionResearch}
                                     onRefNavigate={handleRefNav}
                                     onCreateRef={handleCreateRef}
                                     tableDetails={data.data_tables as Array<Record<string, unknown>>}
@@ -5250,6 +5271,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                       modules={mentionModules}
                                       features={mentionFeatures}
                                 concepts={mentionConcepts}
+                                research={mentionResearch}
                                       onRefNavigate={handleRefNav}
                                       onCreateRef={handleCreateRef}
                                       tableDetails={data.data_tables as Array<Record<string, unknown>>}
@@ -5296,6 +5318,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                 modules={mentionModules}
                                 features={mentionFeatures}
                                 concepts={mentionConcepts}
+                                research={mentionResearch}
                                 onRefNavigate={handleRefNav}
                                 onCreateRef={handleCreateRef}
                                       tableDetails={data.data_tables as Array<Record<string, unknown>>}
@@ -5665,6 +5688,12 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                             } else if (type === "feature") {
                                               const f2 = (data.features || []).find((f) => String(f.featureName) === name);
                                               if (f2) setRefSummaryPopup({ type: "feature", record: f2 as Record<string, unknown> });
+                                            } else if (type === "concept") {
+                                              const con = (data.concepts || []).find((c) => String(c.conceptName) === name);
+                                              if (con) setRefSummaryPopup({ type: "concept", record: con as Record<string, unknown> });
+                                            } else if (type === "research") {
+                                              const res = (data.research || []).find((r) => String(r.title) === name);
+                                              if (res) setRefSummaryPopup({ type: "research", record: res as Record<string, unknown> });
                                             } else if (type === "image") {
                                               const imgs = (Array.isArray(feat.images) ? feat.images : []) as Array<{ id: string; url: string; title: string }>;
                                               const img = imgs.find((im) => im.title === name);
@@ -5726,6 +5755,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                                       modules={mentionModules}
                                                       features={mentionFeatures}
                                 concepts={mentionConcepts}
+                                research={mentionResearch}
                                                       onRefNavigate={handleRefNav}
                                                       onCreateRef={handleCreateRef}
                                                       tableDetails={data.data_tables as Array<Record<string, unknown>>}
@@ -5766,6 +5796,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                                           modules={mentionModules}
                                                           features={mentionFeatures}
                                 concepts={mentionConcepts}
+                                research={mentionResearch}
                                                           onRefNavigate={handleRefNav}
                                                           onCreateRef={handleCreateRef}
                                                           tableDetails={data.data_tables as Array<Record<string, unknown>>}
@@ -5807,6 +5838,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                                     modules={mentionModules}
                                                     features={mentionFeatures}
                                 concepts={mentionConcepts}
+                                research={mentionResearch}
                                                     onRefNavigate={handleRefNav}
                                                     onCreateRef={handleCreateRef}
                                                     tableDetails={data.data_tables as Array<Record<string, unknown>>}
@@ -6412,6 +6444,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
             allFields={data.data_fields as Record<string, unknown>[]}
             modules={mentionModules}
             allFeatures={mentionFeatures}
+            allConcepts={mentionConcepts}
             highlightFieldName={refSummaryPopup.highlightField}
             onClose={() => setRefSummaryPopup(null)}
             onFieldUpdate={(updatedField) => {
@@ -7364,7 +7397,35 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
                 modules={mentionModules}
                 features={mentionFeatures}
                 concepts={mentionConcepts}
-                onRefNavigate={() => {}}
+                research={mentionResearch}
+                onRefNavigate={(type, name) => {
+                  if (type === "table") {
+                    const tbl = (data.data_tables || []).find((t) => String(t.tableName) === name);
+                    if (tbl) setRefSummaryPopup({ type: "table", record: tbl as Record<string, unknown> });
+                  } else if (type === "field") {
+                    const parts = name.split(".");
+                    const tblName = parts[0];
+                    const fieldName = parts.slice(1).join(".");
+                    const tbl = (data.data_tables || []).find((t) => String(t.tableName) === tblName);
+                    if (tbl) setRefSummaryPopup({ type: "table", record: tbl as Record<string, unknown>, highlightField: fieldName });
+                  } else if (type === "module") {
+                    const mod = (data.modules || []).find((m) => String(m.moduleName) === name);
+                    if (mod) setRefSummaryPopup({ type: "module", record: mod as Record<string, unknown> });
+                  } else if (type === "feature") {
+                    const feat = (data.features || []).find((f) => String(f.featureName) === name);
+                    if (feat) setRefSummaryPopup({ type: "feature", record: feat as Record<string, unknown> });
+                  } else if (type === "concept") {
+                    const con = (data.concepts || []).find((c) => String(c.conceptName) === name);
+                    if (con) setRefSummaryPopup({ type: "concept", record: con as Record<string, unknown> });
+                  } else if (type === "research") {
+                    const res = (data.research || []).find((r) => String(r.title) === name);
+                    if (res) setRefSummaryPopup({ type: "research", record: res as Record<string, unknown> });
+                  } else if (type === "image") {
+                    const imgs = (Array.isArray(row.images) ? row.images : []) as Array<{ id: string; url: string; title: string }>;
+                    const img = imgs.find((im) => im.title === name);
+                    if (img?.url) setImageViewer({ url: img.url, title: img.title, x: 100, y: 100, width: 1200, height: 600, zoom: 1, originX: 50, originY: 50 });
+                  }
+                }}
                 onCreateRef={() => {}}
                 tableDetails={data.data_tables as Array<Record<string, unknown>>}
                 placeholder="Notes... type ( to reference a table, field, or image"

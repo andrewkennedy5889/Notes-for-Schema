@@ -388,6 +388,14 @@ function initSchema(db: Database.Database) {
       template_id     INTEGER NOT NULL REFERENCES _splan_display_templates(id) ON DELETE CASCADE,
       UNIQUE(entity_type, column_key)
     );
+
+    CREATE TABLE IF NOT EXISTS _splan_sync_meta (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      sync_direction  TEXT NOT NULL,
+      remote_url      TEXT NOT NULL,
+      synced_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      rows_synced     INTEGER NOT NULL DEFAULT 0
+    );
   `);
 
   // Migrations: add columns to existing tables (safe to re-run — ignores if column exists)
