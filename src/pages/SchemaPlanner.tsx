@@ -900,19 +900,36 @@ export default function SchemaPlanner() {
                     const remoteCount = syncStatus.remote?.changeCount ?? 0;
                     const localCount = syncStatus.local?.changeCount ?? 0;
                     const conflict = remoteCount > 0 && localCount > 0;
+                    const schema = syncStatus.schema;
+                    const schemaMismatch = schema ? !schema.match : false;
                     return (
                       <>
-                        {conflict && (
+                        {schemaMismatch && schema && (
+                          <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(168,85,247,0.1)", border: "1px solid rgba(168,85,247,0.4)", color: "#a855f7" }}>
+                            <strong>Schema mismatch:</strong> Push and Pull are blocked until the code is in sync.
+                            {schema.missingOnRemote.length > 0 && (
+                              <div className="mt-1">
+                                Remote is missing {schema.missingOnRemote.length} table(s): <span className="font-mono">{schema.missingOnRemote.join(', ')}</span>. Deploy Code to bring the remote schema up to date.
+                              </div>
+                            )}
+                            {schema.missingOnLocal.length > 0 && (
+                              <div className="mt-1">
+                                Local is missing {schema.missingOnLocal.length} table(s): <span className="font-mono">{schema.missingOnLocal.join(', ')}</span>. Pull the latest code to this machine.
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {!schemaMismatch && conflict && (
                           <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(224,85,85,0.1)", border: "1px solid rgba(224,85,85,0.3)", color: "#e05555" }}>
                             <strong>Conflict:</strong> both sides have changes ({localCount} local, {remoteCount} remote). Push and Pull are disabled — review the differences and pick a side to force, or resolve manually.
                           </div>
                         )}
-                        {!conflict && remoteCount > 0 && (
+                        {!schemaMismatch && !conflict && remoteCount > 0 && (
                           <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(242,182,97,0.1)", border: "1px solid rgba(242,182,97,0.3)", color: "#f2b661" }}>
                             Remote has {remoteCount} change(s) since last sync — Push is disabled. Pull to fast-forward.
                           </div>
                         )}
-                        {!conflict && localCount > 0 && (
+                        {!schemaMismatch && !conflict && localCount > 0 && (
                           <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(66,139,202,0.1)", border: "1px solid rgba(66,139,202,0.3)", color: "#428bca" }}>
                             Local has {localCount} change(s) since last sync — Pull is disabled. Push to update remote.
                           </div>
@@ -932,8 +949,9 @@ export default function SchemaPlanner() {
                     const remoteCount = syncStatus.remote?.changeCount ?? 0;
                     const localCount = syncStatus.local?.changeCount ?? 0;
                     const conflict = remoteCount > 0 && localCount > 0;
-                    const pushBlocked = remoteCount > 0;  // blocked if remote has changes
-                    const pullBlocked = localCount > 0;   // blocked if local has changes
+                    const schemaMismatch = syncStatus.schema ? !syncStatus.schema.match : false;
+                    const pushBlocked = remoteCount > 0 || schemaMismatch;
+                    const pullBlocked = localCount > 0 || schemaMismatch;
                     const hasAnyChanges = remoteCount > 0 || localCount > 0;
 
                     return (
@@ -949,7 +967,7 @@ export default function SchemaPlanner() {
                               opacity: (syncLoading && syncLoading !== 'push') || pushBlocked ? 0.35 : 1,
                               cursor: pushBlocked ? "not-allowed" : undefined,
                             }}
-                            title={pushBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Remote has unsynced changes. Pull first.") : "Push local data to remote"}
+                            title={schemaMismatch ? "Blocked by schema mismatch — Deploy Code first" : pushBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Remote has unsynced changes. Pull first.") : "Push local data to remote"}
                           >
                             {syncLoading === 'push' ? "Pushing..." : "Push Data"}
                           </button>
@@ -963,7 +981,7 @@ export default function SchemaPlanner() {
                               opacity: (syncLoading && syncLoading !== 'pull') || pullBlocked ? 0.35 : 1,
                               cursor: pullBlocked ? "not-allowed" : undefined,
                             }}
-                            title={pullBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Local has unsynced changes. Push first.") : "Pull remote data to local"}
+                            title={schemaMismatch ? "Blocked by schema mismatch — Deploy Code first" : pullBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Local has unsynced changes. Push first.") : "Pull remote data to local"}
                           >
                             {syncLoading === 'pull' ? "Pulling..." : "Pull Data"}
                           </button>
@@ -1003,27 +1021,31 @@ export default function SchemaPlanner() {
                               <>
                                 <button
                                   onClick={handleForcePush}
-                                  disabled={!!syncLoading}
+                                  disabled={!!syncLoading || schemaMismatch}
                                   className="px-3 py-1.5 text-xs rounded font-medium transition-colors"
                                   style={{
                                     backgroundColor: "rgba(224,85,85,0.1)",
                                     border: "1px solid rgba(224,85,85,0.4)",
                                     color: "#e05555",
+                                    opacity: schemaMismatch ? 0.35 : 1,
+                                    cursor: schemaMismatch ? "not-allowed" : undefined,
                                   }}
-                                  title="Overwrite remote with local — destroys all remote changes since last sync"
+                                  title={schemaMismatch ? "Blocked by schema mismatch — Deploy Code first" : "Overwrite remote with local — destroys all remote changes since last sync"}
                                 >
                                   Force Push (discard {remoteCount} remote)
                                 </button>
                                 <button
                                   onClick={handleForcePull}
-                                  disabled={!!syncLoading}
+                                  disabled={!!syncLoading || schemaMismatch}
                                   className="px-3 py-1.5 text-xs rounded font-medium transition-colors"
                                   style={{
                                     backgroundColor: "rgba(224,85,85,0.1)",
                                     border: "1px solid rgba(224,85,85,0.4)",
                                     color: "#e05555",
+                                    opacity: schemaMismatch ? 0.35 : 1,
+                                    cursor: schemaMismatch ? "not-allowed" : undefined,
                                   }}
-                                  title="Overwrite local with remote — destroys all local changes since last sync"
+                                  title={schemaMismatch ? "Blocked by schema mismatch — Deploy Code first" : "Overwrite local with remote — destroys all local changes since last sync"}
                                 >
                                   Force Pull (discard {localCount} local)
                                 </button>

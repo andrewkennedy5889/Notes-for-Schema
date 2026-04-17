@@ -1521,7 +1521,7 @@ app.get('/api/sync/remote-status', async (_req: Request, res: Response) => {
   try {
     const remote = await fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } });
     if (!remote.ok) return void res.json({ configured: true, error: `Remote returned ${remote.status}` });
-    const remoteStatus = await remote.json() as { lastSync: unknown; changesSinceSync: unknown[]; changeCount: number };
+    const remoteStatus = await remote.json() as { lastSync: unknown; changesSinceSync: unknown[]; changeCount: number; schemaTables?: string[] };
 
     // Also check local changes since last sync
     const db = getDb();
@@ -1540,12 +1540,29 @@ app.get('/api/sync/remote-status', async (_req: Request, res: Response) => {
       ).get(lastSync.synced_at) as { cnt: number }).cnt;
     }
 
+    // Schema fingerprint: compare local and remote _splan_ table lists
+    const localTables = getSchemaTables();
+    const remoteTables = remoteStatus.schemaTables ?? null;
+    let schema: { match: boolean; missingOnRemote: string[]; missingOnLocal: string[] } | null = null;
+    if (remoteTables) {
+      const localSet = new Set(localTables);
+      const remoteSet = new Set(remoteTables);
+      const missingOnRemote = localTables.filter(t => !remoteSet.has(t));
+      const missingOnLocal = remoteTables.filter(t => !localSet.has(t));
+      schema = {
+        match: missingOnRemote.length === 0 && missingOnLocal.length === 0,
+        missingOnRemote,
+        missingOnLocal,
+      };
+    }
+
     return void res.json({
       configured: true,
       remoteUrl: auth.baseUrl,
       lastSync: lastSync ? { syncedAt: lastSync.synced_at, direction: lastSync.sync_direction, rowsSynced: lastSync.rows_synced } : null,
       remote: { changeCount: remoteStatus.changeCount, changes: remoteStatus.changesSinceSync },
       local: { changeCount: localChangeCount, changes: localChanges },
+      schema,
     });
   } catch (e: unknown) {
     return void res.json({ configured: true, error: `Failed to reach remote: ${(e as Error).message}` });
@@ -1558,23 +1575,36 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
   const auth = getSyncAuth();
   if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
 
-  // Server-side guardrail: reject push if remote has unsynced changes, unless ?force=true
+  // Server-side guardrails. ?force=true bypasses the change-count check but NOT
+  // the schema check — a schema mismatch can't be meaningfully force-overridden.
   const force = req.query.force === 'true' || (req.body as { force?: boolean })?.force === true;
-  if (!force) {
-    try {
-      const remote = await fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } });
-      if (remote.ok) {
-        const s = await remote.json() as { changeCount: number };
-        if (s.changeCount > 0) {
+  try {
+    const remote = await fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } });
+    if (remote.ok) {
+      const s = await remote.json() as { changeCount: number; schemaTables?: string[] };
+
+      // Schema mismatch: if local has tables remote doesn't, push would silently skip them.
+      if (s.schemaTables) {
+        const remoteSet = new Set(s.schemaTables);
+        const missingOnRemote = getSchemaTables().filter(t => !remoteSet.has(t));
+        if (missingOnRemote.length > 0) {
           return void res.status(409).json({
-            error: `Remote has ${s.changeCount} unsynced change(s). Pull first, or retry with force=true to overwrite remote.`,
-            conflict: true,
-            remoteChangeCount: s.changeCount,
+            error: `Schema mismatch: remote is missing ${missingOnRemote.length} table(s) (${missingOnRemote.slice(0, 3).join(', ')}${missingOnRemote.length > 3 ? '…' : ''}). Deploy Code first so remote's schema matches.`,
+            schemaMismatch: true,
+            missingOnRemote,
           });
         }
       }
-    } catch { /* if we can't reach remote status, fall through to the push itself which will fail cleanly */ }
-  }
+
+      if (!force && s.changeCount > 0) {
+        return void res.status(409).json({
+          error: `Remote has ${s.changeCount} unsynced change(s). Pull first, or retry with force=true to overwrite remote.`,
+          conflict: true,
+          remoteChangeCount: s.changeCount,
+        });
+      }
+    }
+  } catch { /* if we can't reach remote status, fall through to the push itself which will fail cleanly */ }
 
   backupDatabase();
 
@@ -1623,8 +1653,29 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
   const auth = getSyncAuth();
   if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
 
-  // Server-side guardrail: reject pull if local has unsynced changes, unless ?force=true
   const force = req.query.force === 'true' || (req.body as { force?: boolean })?.force === true;
+
+  // Schema check: if remote has tables local doesn't, a pull would silently skip
+  // the data in those tables (db-import skips unknown tables). Block regardless of force.
+  try {
+    const remote = await fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } });
+    if (remote.ok) {
+      const s = await remote.json() as { schemaTables?: string[] };
+      if (s.schemaTables) {
+        const localSet = new Set(getSchemaTables());
+        const missingOnLocal = s.schemaTables.filter(t => !localSet.has(t));
+        if (missingOnLocal.length > 0) {
+          return void res.status(409).json({
+            error: `Schema mismatch: local is missing ${missingOnLocal.length} table(s) (${missingOnLocal.slice(0, 3).join(', ')}${missingOnLocal.length > 3 ? '…' : ''}). Deploy Code on the local side or re-pull the codebase first.`,
+            schemaMismatch: true,
+            missingOnLocal,
+          });
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Change-count guardrail (overridable via force)
   if (!force) {
     const dbCheck = getDb();
     const lastSync = dbCheck.prepare('SELECT synced_at FROM _splan_sync_meta ORDER BY synced_at DESC LIMIT 1')
@@ -1989,6 +2040,15 @@ app.get('/api/db-export', (_req: Request, res: Response) => {
   return void res.json({ tables });
 });
 
+// List of _splan_ tables present in the current schema. Used to detect code drift
+// (remote deployed an older codebase that's missing tables the local app defines).
+function getSchemaTables(): string[] {
+  const db = getDb();
+  return (db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_splan_%' ORDER BY name"
+  ).all() as Array<{ name: string }>).map(t => t.name);
+}
+
 // ─── GET /api/sync-status — changes since last sync ─────────────────────────
 app.get('/api/sync-status', (_req: Request, res: Response) => {
   const db = getDb();
@@ -1998,8 +2058,10 @@ app.get('/api/sync-status', (_req: Request, res: Response) => {
     'SELECT * FROM _splan_sync_meta ORDER BY synced_at DESC LIMIT 1'
   ).get() as { id: number; sync_direction: string; remote_url: string; synced_at: string; rows_synced: number } | undefined;
 
+  const schemaTables = getSchemaTables();
+
   if (!lastSync) {
-    return void res.json({ lastSync: null, changesSinceSync: [], changeCount: 0 });
+    return void res.json({ lastSync: null, changesSinceSync: [], changeCount: 0, schemaTables });
   }
 
   // Get change_log entries since last sync
@@ -2022,6 +2084,7 @@ app.get('/api/sync-status', (_req: Request, res: Response) => {
     },
     changesSinceSync: changes.slice(0, 50), // cap at 50 for readability
     changeCount: changes.length,
+    schemaTables,
   });
 });
 

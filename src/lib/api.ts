@@ -305,6 +305,7 @@ export interface SyncStatus {
   lastSync?: { syncedAt: string; direction: string; rowsSynced: number } | null;
   remote?: { changeCount: number; changes: Array<{ entity_type: string; entity_id: number; action: string; field_changed?: string; changed_at: string }> };
   local?: { changeCount: number; changes: Array<{ entity_type: string; entity_id: number; action: string; field_changed?: string; changed_at: string }> };
+  schema?: { match: boolean; missingOnRemote: string[]; missingOnLocal: string[] } | null;
 }
 
 export async function fetchSyncStatus(): Promise<SyncStatus> {
