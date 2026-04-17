@@ -50,7 +50,7 @@ import PrototypesGrid from "./PrototypesGrid";
 import ProjectsGrid from "./ProjectsGrid";
 import DependedOnBySection from "./DependedOnBySection";
 import { FullscreenNoteWrapper } from "./FullscreenNoteWrapper";
-import { fetchColumnDefs, createColumnDef, deleteColumnDef, type ColumnDef, fetchDisplayTemplates, fetchColumnTemplateAssignments, seedDisplayTemplates, createDisplayTemplate, updateDisplayTemplate, deleteDisplayTemplate, assignColumnTemplate, removeColumnTemplateAssignment, type DisplayTemplate, type ColumnTemplateAssignment, fetchEntityNotesByType, saveEntityNote, type EntityNote } from "@/lib/api";
+import { fetchColumnDefs, createColumnDef, deleteColumnDef, type ColumnDef, fetchDisplayTemplates, fetchColumnTemplateAssignments, seedDisplayTemplates, createDisplayTemplate, updateDisplayTemplate, deleteDisplayTemplate, assignColumnTemplate, removeColumnTemplateAssignment, type DisplayTemplate, type ColumnTemplateAssignment, fetchEntityNotesByType, saveEntityNote, type EntityNote, fetchDependenciesByType, fetchDependencies, updateDependency, deleteDependency, type DependencyEntry } from "@/lib/api";
 import { evaluateFormula } from "@/lib/formula-eval";
 
 /** Draggable table row grip handle */
@@ -604,6 +604,77 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
   // Re-fetch when tab changes or when row count changes (new rows may have been added)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subTab, (data[subTab] || []).length]);
+
+  // Dependencies cache: keyed by the NOTES key (not the deps column key) —
+  // `${entityType}:${entityId}:${notesKey}` → DependencyEntry[]. Grid badges read this,
+  // the side panel reads + mutates it, and note saves refresh the affected entity.
+  const [dependenciesCache, setDependenciesCache] = useState<Record<string, DependencyEntry[]>>({});
+  const depCacheKey = useCallback((entityType: string, entityId: number, noteKey: string) => `${entityType}:${entityId}:${noteKey}`, []);
+  // Strip the `_deps` suffix added by the auto-pair logic so we can look up the notes key the
+  // dependency entries are stored under.
+  const noteKeyFromDepCol = useCallback((depColKey: string) => depColKey.replace(/_deps$/, ""), []);
+  useEffect(() => {
+    const cfg = TABLE_CONFIGS[subTab];
+    if (!cfg) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const entityType = cfg.entityType;
+        const deps = await fetchDependenciesByType(entityType);
+        if (cancelled) return;
+        setDependenciesCache((prev) => {
+          const next = { ...prev };
+          // Group deps by `${entityType}:${entityId}:${noteKey}`. Replace groups we saw so stale
+          // entries from prior fetches of the same tab don't linger.
+          const groups = new Map<string, DependencyEntry[]>();
+          for (const d of deps) {
+            const key = depCacheKey(d.entityType, d.entityId, d.noteKey);
+            const existing = groups.get(key);
+            if (existing) existing.push(d); else groups.set(key, [d]);
+          }
+          // Clear any stale groups for this entityType so removed deps don't persist.
+          for (const k of Object.keys(next)) {
+            if (k.startsWith(`${entityType}:`)) delete next[k];
+          }
+          for (const [k, v] of groups) next[k] = v;
+          return next;
+        });
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subTab, (data[subTab] || []).length]);
+
+  // Dependencies side panel — opened when clicking a dependencies cell.
+  // depColKey is the grid column key (still has `_deps` suffix); resolve to notesKey via noteKeyFromDepCol.
+  const [depPanel, setDepPanel] = useState<{ row: Record<string, unknown>; tabKey: string; depColKey: string } | null>(null);
+  useEffect(() => {
+    if (!depPanel) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") setDepPanel(null); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [depPanel]);
+
+  // Refresh deps for a single entity. Used after a notes save to pick up any auto-extracted
+  // insertions/stale-markings the server just performed.
+  const refreshDependenciesForEntity = useCallback(async (entityType: string, entityId: number) => {
+    try {
+      const rows = await fetchDependencies(entityType, entityId);
+      setDependenciesCache((prev) => {
+        const next = { ...prev };
+        // Remove all prior entries for this entity, then re-add.
+        for (const k of Object.keys(next)) {
+          if (k.startsWith(`${entityType}:${entityId}:`)) delete next[k];
+        }
+        for (const d of rows) {
+          const key = depCacheKey(d.entityType, d.entityId, d.noteKey);
+          const existing = next[key];
+          if (existing) existing.push(d); else next[key] = [d];
+        }
+        return next;
+      });
+    } catch { /* ignore */ }
+  }, [depCacheKey]);
 
   // Image carousel modal
   const [carouselState, setCarouselState] = useState<{ row: Record<string, unknown>; tabKey: string } | null>(null);
@@ -3352,6 +3423,34 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
             title={isUnsaved ? "Save this row first before adding notes" : "Click to open notes"}
           >
             {renderCell(col, displayValue)}
+          </span>
+        );
+      }
+
+      // Dependencies badge — clickable cell that opens the Dependencies side panel.
+      // The cell's "value" is meaningless for this type; the real data lives in dependenciesCache.
+      if (col.type === "dependencies") {
+        const tabCfg = TABLE_CONFIGS[subTab];
+        const eid = tabCfg?.idKey ? (row[tabCfg.idKey] as number) : 0;
+        const entityType = tabCfg?.entityType || subTab;
+        const notesKey = noteKeyFromDepCol(col.key);
+        const isUnsaved = !eid || eid <= 0;
+        const deps = dependenciesCache[depCacheKey(entityType, eid, notesKey)] ?? [];
+        const total = deps.length;
+        const stale = deps.filter((d) => d.isStale).length;
+        const badge = total === 0
+          ? <span style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}>null</span>
+          : <span style={{ color: "#a78bfa" }}>{total} dep{total === 1 ? "" : "s"}{stale > 0 ? ` · ${stale} stale` : ""}</span>;
+        if (isUnsaved) {
+          return <span className="px-0.5 -mx-0.5 block min-h-[1.2em]" style={{ opacity: 0.5, cursor: "not-allowed" }} title="Save this row first">{badge}</span>;
+        }
+        return (
+          <span
+            className="cursor-pointer hover:bg-black/5 rounded px-0.5 -mx-0.5 block min-h-[1.2em]"
+            onClick={(e) => { e.stopPropagation(); setDepPanel({ row, tabKey: subTab, depColKey: col.key }); }}
+            title="Click to view dependencies"
+          >
+            {badge}
           </span>
         );
       }
@@ -7432,6 +7531,9 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
               embeddedTables: tables ?? {},
             });
             setEntityNotesCache((prev) => ({ ...prev, [cacheKey]: saved }));
+            // Server auto-extracts refs into _splan_entity_dependencies on content changes,
+            // so pull the fresh deps for this entity to keep badges accurate.
+            refreshDependenciesForEntity(entityType, eid);
           } catch (err) {
             console.error("Failed to save note:", err);
           }
@@ -7554,6 +7656,171 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
                   />
                 </div>
               )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══ Dependencies side panel (paired with any Notes column) ═══ */}
+      {depPanel && (() => {
+        const { row, tabKey, depColKey } = depPanel;
+        const tabCfg = TABLE_CONFIGS[tabKey];
+        const entityType = tabCfg?.entityType || tabKey;
+        const eid = tabCfg?.idKey ? (row[tabCfg.idKey] as number) : 0;
+        const entityName = String((tabCfg?.nameKey ? row[tabCfg.nameKey] : row.name) || "Untitled");
+        const notesKey = noteKeyFromDepCol(depColKey);
+        const notesColDef = tabCfg?.columns.find((c) => c.key === notesKey);
+        const depsColDef = tabCfg?.columns.find((c) => c.key === depColKey);
+        const headerLabel = depsColDef?.label ?? `${notesColDef?.label ?? "Notes"} Dependencies`;
+        const deps = dependenciesCache[depCacheKey(entityType, eid, notesKey)] ?? [];
+        // Ref-type visual styling: icons/colors track the rawToDisplay conventions used elsewhere.
+        const REF_META: Record<string, { icon: string; color: string }> = {
+          Table:    { icon: "",   color: "#a855f7" },
+          Field:    { icon: "",   color: "#5bc0de" },
+          Module:   { icon: "🌐", color: "#f2b661" },
+          Feature:  { icon: "⚡", color: "#4ecb71" },
+          Concept:  { icon: "💡", color: "#c084fc" },
+          Research: { icon: "🔬", color: "#60a5fa" },
+          Image:    { icon: "🎨", color: "#ec4899" },
+        };
+        const REF_ORDER: DependencyEntry["refType"][] = ["Module", "Feature", "Concept", "Table", "Field", "Research", "Image"];
+        const groups = new Map<DependencyEntry["refType"], DependencyEntry[]>();
+        for (const d of deps) {
+          const list = groups.get(d.refType);
+          if (list) list.push(d); else groups.set(d.refType, [d]);
+        }
+        const updateOne = async (id: number, patch: { explanation?: string; isStale?: boolean; autoAdded?: boolean }) => {
+          try {
+            const updated = await updateDependency(id, patch);
+            setDependenciesCache((prev) => {
+              const next = { ...prev };
+              const key = depCacheKey(updated.entityType, updated.entityId, updated.noteKey);
+              const list = (next[key] ?? []).map((d) => (d.id === updated.id ? updated : d));
+              next[key] = list;
+              return next;
+            });
+          } catch (err) { console.error("Failed to update dependency:", err); }
+        };
+        const deleteOne = async (id: number) => {
+          try {
+            await deleteDependency(id);
+            setDependenciesCache((prev) => {
+              const next = { ...prev };
+              for (const k of Object.keys(next)) next[k] = next[k].filter((d) => d.id !== id);
+              return next;
+            });
+          } catch (err) { console.error("Failed to delete dependency:", err); }
+        };
+        return (
+          <div
+            className="fixed inset-0 z-40 flex justify-end"
+            style={{ background: "rgba(0,0,0,0.35)" }}
+            onClick={() => setDepPanel(null)}
+          >
+            <div
+              className="h-full w-[460px] flex flex-col border-l shadow-2xl"
+              style={{ background: "var(--color-background)", borderColor: "var(--color-divider)" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div
+                className="flex items-center justify-between px-4 py-3 border-b shrink-0"
+                style={{ borderColor: "var(--color-divider)", background: "var(--color-surface)" }}
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold truncate" style={{ color: "var(--color-text)" }}>{entityName}</div>
+                  <div className="text-xs truncate" style={{ color: "var(--color-text-muted)" }}>{headerLabel}</div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    disabled
+                    className="text-xs px-2 py-1 rounded border cursor-not-allowed"
+                    style={{ color: "var(--color-text-muted)", borderColor: "var(--color-divider)", opacity: 0.5 }}
+                    title="Available in next release"
+                  >Analyze Now</button>
+                  <button
+                    onClick={() => setDepPanel(null)}
+                    className="w-7 h-7 rounded flex items-center justify-center text-sm hover:bg-white/10 transition-colors"
+                    style={{ color: "var(--color-text-muted)" }}
+                    title="Close (Esc)"
+                  >✕</button>
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto px-4 py-3">
+                {deps.length === 0 ? (
+                  <div className="text-xs italic" style={{ color: "var(--color-text-muted)" }}>
+                    No dependencies yet. Add references in the note (type <code>(</code> to pick from tables, modules, features, concepts, etc.) and they'll appear here automatically.
+                  </div>
+                ) : (
+                  REF_ORDER.filter((t) => groups.has(t)).map((refType) => {
+                    const meta = REF_META[refType];
+                    const list = groups.get(refType)!;
+                    return (
+                      <div key={refType} className="mb-4">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: meta.color }}>
+                          {meta.icon ? `${meta.icon} ` : ""}{refType} ({list.length})
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          {list.map((d) => {
+                            const staleStyle: React.CSSProperties = d.isStale
+                              ? { textDecoration: "line-through", background: "rgba(224,85,85,0.08)", borderColor: "rgba(224,85,85,0.4)" }
+                              : {};
+                            const autoAnalyzed = d.lastAnalyzedAt != null;
+                            const footer = d.isUserEdited
+                              ? "Edited by you · Will be re-analyzed with your edit in context"
+                              : d.autoAdded
+                                ? (autoAnalyzed ? `Auto-analyzed: ${d.lastAnalyzedAt}` : "Auto-added · Not yet analyzed")
+                                : "Manually added";
+                            return (
+                              <div
+                                key={d.id}
+                                className="rounded border px-2 py-1.5"
+                                style={{ borderColor: "var(--color-divider)", ...staleStyle }}
+                              >
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-xs font-medium truncate" style={{ color: meta.color }}>{d.refName ?? `#${d.refId}`}</span>
+                                  {d.isStale && (
+                                    <>
+                                      <button
+                                        onClick={() => deleteOne(d.id)}
+                                        className="text-[10px] px-1.5 py-0.5 rounded hover:bg-white/10 ml-auto"
+                                        style={{ color: "#e05555", border: "1px solid rgba(224,85,85,0.4)", textDecoration: "none" }}
+                                        title="Permanently remove this dependency"
+                                      >Dismiss</button>
+                                      <button
+                                        onClick={() => updateOne(d.id, { isStale: false, autoAdded: false })}
+                                        className="text-[10px] px-1.5 py-0.5 rounded hover:bg-white/10"
+                                        style={{ color: "#4ecb71", border: "1px solid rgba(78,203,113,0.4)", textDecoration: "none" }}
+                                        title="Keep as a manual dependency (won't be stale-marked by future auto-runs)"
+                                      >Keep</button>
+                                    </>
+                                  )}
+                                </div>
+                                <textarea
+                                  defaultValue={d.explanation}
+                                  rows={2}
+                                  onBlur={(e) => {
+                                    const v = e.currentTarget.value;
+                                    if (v !== d.explanation) updateOne(d.id, { explanation: v });
+                                  }}
+                                  placeholder="Why does this entity depend on this ref?"
+                                  className="w-full text-xs px-1.5 py-1 rounded border resize-y"
+                                  style={{
+                                    background: "var(--color-surface)",
+                                    borderColor: "var(--color-divider)",
+                                    color: "var(--color-text)",
+                                    textDecoration: "none",
+                                  }}
+                                />
+                                <div className="text-[10px] mt-1" style={{ color: "var(--color-text-muted)", textDecoration: "none" }}>{footer}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
             </div>
           </div>
         );

@@ -380,6 +380,96 @@ export async function deleteEntityNote(
   return res.json();
 }
 
+// ─── Entity Dependencies (paired with entity notes) ─────────────────────────
+
+export type DependencyRefType = 'Table' | 'Field' | 'Module' | 'Feature' | 'Concept' | 'Research' | 'Image';
+
+export interface DependencyEntry {
+  id: number;
+  entityType: string;
+  entityId: number;
+  noteKey: string;
+  refType: DependencyRefType;
+  refId: string;
+  refName: string | null;
+  explanation: string;
+  previousUserEdit: string | null;
+  isStale: boolean;
+  isUserEdited: boolean;
+  autoAdded: boolean;
+  lastAnalyzedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchDependenciesByType(entityType: string): Promise<DependencyEntry[]> {
+  const url = `${BASE}/schema-planner/dependencies?entityType=${encodeURIComponent(entityType)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetchDependenciesByType failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchDependencies(
+  entityType: string,
+  entityId: number,
+  noteKey?: string
+): Promise<DependencyEntry[]> {
+  const q = new URLSearchParams({ entityType, entityId: String(entityId) });
+  if (noteKey) q.set('noteKey', noteKey);
+  const res = await fetch(`${BASE}/schema-planner/dependencies?${q.toString()}`);
+  if (!res.ok) throw new Error(`fetchDependencies failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchDependenciesForRef(refType: string, refId: string): Promise<DependencyEntry[]> {
+  const q = new URLSearchParams({ refType, refId });
+  const res = await fetch(`${BASE}/schema-planner/dependencies?${q.toString()}`);
+  if (!res.ok) throw new Error(`fetchDependenciesForRef failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function createDependency(data: {
+  entityType: string;
+  entityId: number;
+  noteKey: string;
+  refType: DependencyRefType;
+  refId: string;
+  refName?: string | null;
+  explanation?: string;
+}): Promise<DependencyEntry> {
+  const res = await fetch(`${BASE}/schema-planner/dependencies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `createDependency failed: ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function updateDependency(
+  id: number,
+  patch: { explanation?: string; isStale?: boolean; autoAdded?: boolean }
+): Promise<DependencyEntry> {
+  const res = await fetch(`${BASE}/schema-planner/dependencies/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(`updateDependency failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function deleteDependency(id: number): Promise<{ success: boolean }> {
+  const res = await fetch(`${BASE}/schema-planner/dependencies/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`deleteDependency failed: ${res.statusText}`);
+  return res.json();
+}
+
 // ─── Data Sync ──────────────────────────────────────────────────────────────
 
 export interface SyncStatus {

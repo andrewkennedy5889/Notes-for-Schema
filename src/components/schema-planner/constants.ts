@@ -182,6 +182,7 @@ export const TABLE_CONFIGS: Record<string, TableConfig> = {
       { key: "modules", label: "Modules", type: "multi-fk", fkTable: "modules", fkId: "moduleId", fkName: "moduleName", tooltip: "Modules this concept relates to" },
       { key: "dataTables", label: "Data Tables", type: "multi-fk", fkTable: "data_tables", fkId: "tableId", fkName: "tableName", tooltip: "Data tables this concept relates to" },
       { key: "notes", label: "Notes", type: "note-fullscreen", tooltip: "Click to open notes in fullscreen editor" },
+      { key: "notes_deps", label: "Notes Dependencies", type: "dependencies", hideInGrid: true, hideInModal: true, tooltip: "References extracted from notes with per-ref rationale" },
       { key: "notesFmt", label: "Notes Fmt", type: "readonly", hideInGrid: true, hideInModal: true },
       { key: "collapsedSections", label: "Collapsed Sections", type: "readonly", hideInGrid: true, hideInModal: true },
       { key: "embeddedTables", label: "Embedded Tables", type: "readonly", hideInGrid: true, hideInModal: true },
