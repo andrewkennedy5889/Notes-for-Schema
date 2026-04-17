@@ -50,7 +50,7 @@ import PrototypesGrid from "./PrototypesGrid";
 import ProjectsGrid from "./ProjectsGrid";
 import DependedOnBySection from "./DependedOnBySection";
 import { FullscreenNoteWrapper } from "./FullscreenNoteWrapper";
-import { fetchColumnDefs, createColumnDef, deleteColumnDef, type ColumnDef, fetchDisplayTemplates, fetchColumnTemplateAssignments, seedDisplayTemplates, createDisplayTemplate, updateDisplayTemplate, deleteDisplayTemplate, assignColumnTemplate, removeColumnTemplateAssignment, type DisplayTemplate, type ColumnTemplateAssignment } from "@/lib/api";
+import { fetchColumnDefs, createColumnDef, deleteColumnDef, type ColumnDef, fetchDisplayTemplates, fetchColumnTemplateAssignments, seedDisplayTemplates, createDisplayTemplate, updateDisplayTemplate, deleteDisplayTemplate, assignColumnTemplate, removeColumnTemplateAssignment, type DisplayTemplate, type ColumnTemplateAssignment, fetchEntityNotesByType, saveEntityNote, type EntityNote } from "@/lib/api";
 import { evaluateFormula } from "@/lib/formula-eval";
 
 /** Draggable table row grip handle */
@@ -568,14 +568,42 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
   const [matrixTierFilter, setMatrixTierFilter] = useState<string>("all");
   const [matrixSwimFilter, setMatrixSwimFilter] = useState<string>("all");
 
-  // Concepts: fullscreen note overlay
-  const [fullscreenConceptNote, setFullscreenConceptNote] = useState<Record<string, unknown> | null>(null);
+  // Fullscreen note overlay (generalized: any tab, any notes column)
+  const [fullscreenNote, setFullscreenNote] = useState<{ row: Record<string, unknown>; tabKey: string; noteKey: string } | null>(null);
   useEffect(() => {
-    if (!fullscreenConceptNote) return;
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") setFullscreenConceptNote(null); };
+    if (!fullscreenNote) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") setFullscreenNote(null); };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [fullscreenConceptNote]);
+  }, [fullscreenNote]);
+
+  // Shared notes cache: cacheKey = `${entityType}:${entityId}:${noteKey}` → EntityNote.
+  // Populated by tab-load fetch + on-save updates. Cell badges and editor reads use this.
+  const [entityNotesCache, setEntityNotesCache] = useState<Record<string, EntityNote>>({});
+  const noteCacheKey = useCallback((entityType: string, entityId: number, noteKey: string) => `${entityType}:${entityId}:${noteKey}`, []);
+  // Load all notes for the active tab's entity type whenever tab data refreshes
+  useEffect(() => {
+    const cfg = TABLE_CONFIGS[subTab];
+    if (!cfg) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const entityType = cfg.entityType;
+        const notes = await fetchEntityNotesByType(entityType);
+        if (cancelled) return;
+        setEntityNotesCache((prev) => {
+          const next = { ...prev };
+          for (const note of notes) {
+            next[noteCacheKey(entityType, note.entityId, note.noteKey)] = note;
+          }
+          return next;
+        });
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  // Re-fetch when tab changes or when row count changes (new rows may have been added)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subTab, (data[subTab] || []).length]);
 
   // Image carousel modal
   const [carouselState, setCarouselState] = useState<{ row: Record<string, unknown>; tabKey: string } | null>(null);
@@ -2513,7 +2541,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
   const renderCell = useCallback(
     (col: ColDef, value: unknown) => {
       if (value == null || value === "") {
-        if (col.type === "note-fullscreen" || col.type === "image-carousel" || col.type === "test-count") return <span style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}>null</span>;
+        if (col.type === "note-fullscreen" || col.type === "notes" || col.type === "image-carousel" || col.type === "test-count") return <span style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}>null</span>;
         return <span style={{ color: "var(--color-text-muted)" }}>—</span>;
       }
 
@@ -2661,9 +2689,15 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
           // Virtual column — handled in renderInlineCell
           return <span style={{ color: "var(--color-text-muted)" }}>—</span>;
 
-        case "note-fullscreen": {
-          if (value == null || value === "") return <span style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}>null</span>;
-          const noteStr = String(value);
+        case "note-fullscreen":
+        case "notes": {
+          // Count badge reads from shared notes cache, falling back to legacy row value
+          // (e.g., the original concepts.notes column before backfill is in cache).
+          const noteStr = (() => {
+            if (value != null && value !== "") return String(value);
+            return null;
+          })();
+          if (!noteStr) return <span style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}>null</span>;
           const lineCount = noteStr.split("\n").filter((l) => l.trim()).length;
           return <span style={{ color: "#5bc0de" }}>{lineCount} {lineCount === 1 ? "Line" : "Lines"}</span>;
         }
@@ -3294,15 +3328,22 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
         );
       }
 
-      // Note fullscreen — clickable cell that opens fullscreen note editor
-      if (col.type === "note-fullscreen") {
+      // Note fullscreen — clickable cell that opens fullscreen note editor.
+      // Both legacy "note-fullscreen" type and new generic "notes" type route here.
+      if (col.type === "note-fullscreen" || col.type === "notes") {
+        const tabCfg = TABLE_CONFIGS[subTab];
+        const eid = tabCfg?.idKey ? (row[tabCfg.idKey] as number) : 0;
+        const entityType = tabCfg?.entityType || subTab;
+        // Prefer cache (shared store), fall back to row value (legacy concepts.notes during transition)
+        const cached = entityNotesCache[noteCacheKey(entityType, eid, col.key)];
+        const displayValue = cached?.content ?? value;
         return (
           <span
             className="cursor-pointer hover:bg-black/5 rounded px-0.5 -mx-0.5 block min-h-[1.2em]"
-            onClick={(e) => { e.stopPropagation(); setFullscreenConceptNote(row); }}
+            onClick={(e) => { e.stopPropagation(); setFullscreenNote({ row, tabKey: subTab, noteKey: col.key }); }}
             title="Click to open notes"
           >
-            {renderCell(col, value)}
+            {renderCell(col, displayValue)}
           </span>
         );
       }
@@ -4215,18 +4256,19 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                           <div className="mb-2">
                             <div className="text-[9px] uppercase tracking-wide mb-1" style={{ color: "var(--color-text-muted)" }}>Type</div>
                             <div className="grid grid-cols-4 gap-1">
-                              {(["text", "textarea", "int", "boolean", "enum", "tags", "formula"] as const).map((t) => (
+                              {(["text", "textarea", "int", "boolean", "enum", "tags", "formula", "notes"] as const).map((t) => (
                                 <button
                                   key={t}
                                   onClick={() => { setAddColType(t); if (t !== "enum") setAddColOptions([]); if (t !== "formula") setAddColFormula(""); }}
                                   className="text-[10px] py-1 px-2 rounded text-center cursor-pointer transition-colors"
                                   style={{
-                                    border: `1px solid ${addColType === t ? (t === "formula" ? "#5bc0de" : "#3b82f6") : "var(--color-divider)"}`,
-                                    background: addColType === t ? (t === "formula" ? "rgba(91,192,222,0.1)" : "rgba(59,130,246,0.1)") : "var(--color-bg-base)",
-                                    color: addColType === t ? (t === "formula" ? "#5bc0de" : "#60a5fa") : "var(--color-text-muted)",
+                                    border: `1px solid ${addColType === t ? (t === "formula" ? "#5bc0de" : t === "notes" ? "#a78bfa" : "#3b82f6") : "var(--color-divider)"}`,
+                                    background: addColType === t ? (t === "formula" ? "rgba(91,192,222,0.1)" : t === "notes" ? "rgba(167,139,250,0.1)" : "rgba(59,130,246,0.1)") : "var(--color-bg-base)",
+                                    color: addColType === t ? (t === "formula" ? "#5bc0de" : t === "notes" ? "#a78bfa" : "#60a5fa") : "var(--color-text-muted)",
                                   }}
+                                  title={t === "notes" ? "Rich notes — click to open fullscreen editor with references and formatting" : undefined}
                                 >
-                                  {t === "int" ? "Number" : t === "boolean" ? "Bool" : t === "formula" ? "Formula" : t.charAt(0).toUpperCase() + t.slice(1)}
+                                  {t === "int" ? "Number" : t === "boolean" ? "Bool" : t === "formula" ? "Formula" : t === "notes" ? "Notes" : t.charAt(0).toUpperCase() + t.slice(1)}
                                 </button>
                               ))}
                             </div>
@@ -4363,13 +4405,17 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                             </div>
                           )}
                           {addColError && <div className="text-[10px] mb-1" style={{ color: "#e05555" }}>{addColError}</div>}
-                          <div className="flex justify-end gap-1.5 mt-2">
+                          <div className="flex justify-end items-center gap-1.5 mt-2">
+                            {!addColName.trim() && !addColSaving && (
+                              <span className="text-[10px] italic mr-auto" style={{ color: "var(--color-text-muted)" }}>Enter a name to create</span>
+                            )}
                             <button onClick={resetAddColForm} className="text-[10px] px-2.5 py-1 rounded" style={{ border: "1px solid var(--color-divider)", color: "var(--color-text-muted)" }}>Cancel</button>
                             <button
                               onClick={handleAddColumn}
                               disabled={addColSaving || !addColName.trim()}
                               className="text-[10px] px-3 py-1 rounded font-semibold"
-                              style={{ background: "#4ecb71", color: "var(--color-bg-base)", opacity: addColSaving || !addColName.trim() ? 0.5 : 1 }}
+                              style={{ background: "#4ecb71", color: "var(--color-bg-base)", opacity: addColSaving || !addColName.trim() ? 0.5 : 1, cursor: addColSaving || !addColName.trim() ? "not-allowed" : "pointer" }}
+                              title={!addColName.trim() ? "Enter a column name above" : addColSaving ? "Saving…" : "Create column"}
                             >{addColSaving ? "Creating…" : "Create"}</button>
                           </div>
                         </div>
@@ -7338,11 +7384,51 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
         />
       )}
 
-      {/* ═══ Concept fullscreen note overlay ═══ */}
-      {fullscreenConceptNote && (() => {
-        const row = fullscreenConceptNote;
-        const conceptName = String(row.conceptName || "Untitled");
+      {/* ═══ Generalized fullscreen note overlay (any entity, any notes column) ═══ */}
+      {fullscreenNote && (() => {
+        const { row, tabKey, noteKey } = fullscreenNote;
+        const tabCfg = TABLE_CONFIGS[tabKey];
+        const entityType = tabCfg?.entityType || tabKey;
+        const eid = tabCfg?.idKey ? (row[tabCfg.idKey] as number) : 0;
+        const entityName = String((tabCfg?.nameKey ? row[tabCfg.nameKey] : row.name) || "Untitled");
         const noteColor = "#5bc0de";
+        const cacheKey = noteCacheKey(entityType, eid, noteKey);
+        const cached = entityNotesCache[cacheKey];
+
+        // Initial values: prefer cache, fall back to legacy row fields (Concepts pre-migration).
+        // Each _splan_entity_notes row stores the per-section collapsed/tables maps directly
+        // (not nested by noteKey) — the row IS the single note.
+        const initialContent = cached?.content ?? (noteKey === "notes" ? String(row.notes ?? "") : "");
+        const initialFmt = (cached?.notesFmt ?? (noteKey === "notes" && Array.isArray(row.notesFmt) ? row.notesFmt : [])) as FmtRange[];
+        const cachedCollapsed = cached?.collapsedSections as Record<string, { body: string; bodyFmt: FmtRange[] }> | undefined;
+        const legacyCollapsed = ((row.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {})[noteKey];
+        const initialCollapsed = cachedCollapsed && Object.keys(cachedCollapsed).length > 0 ? cachedCollapsed : legacyCollapsed;
+        const cachedTables = cached?.embeddedTables as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined;
+        const legacyTables = ((row.embeddedTables as Record<string, Record<string, unknown>> | null) ?? {})[noteKey];
+        const initialTables = cachedTables && Object.keys(cachedTables).length > 0 ? cachedTables : (legacyTables as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined);
+
+        const persist = async (
+          content: string | null,
+          fmt: unknown,
+          collapsed: Record<string, unknown> | undefined,
+          tables: Record<string, unknown> | undefined
+        ) => {
+          try {
+            const saved = await saveEntityNote({
+              entityType,
+              entityId: eid,
+              noteKey,
+              content,
+              notesFmt: fmt,
+              collapsedSections: collapsed ?? {},
+              embeddedTables: tables ?? {},
+            });
+            setEntityNotesCache((prev) => ({ ...prev, [cacheKey]: saved }));
+          } catch (err) {
+            console.error("Failed to save note:", err);
+          }
+        };
+
         return (
           <div
             className="fixed inset-0 z-50 flex flex-col"
@@ -7355,16 +7441,16 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
             >
               <label className="font-semibold flex items-center gap-2 text-sm" style={{ color: "var(--color-text)" }}>
                 <button
-                  onClick={() => setFullscreenConceptNote(null)}
+                  onClick={() => setFullscreenNote(null)}
                   className="inline-block w-3 h-3 rounded-full cursor-pointer transition-all hover:scale-125 hover:ring-2 hover:ring-offset-1"
                   style={{ backgroundColor: noteColor, ringColor: noteColor, ringOffsetColor: "var(--color-surface)" }}
                   title="Close"
                 />
-                {conceptName} — Notes
+                {entityName} — {tabCfg?.columns.find((c) => c.key === noteKey)?.label || "Notes"}
                 <span className="font-normal text-xs" style={{ opacity: 0.5 }}>— type ( to reference</span>
               </label>
               <button
-                onClick={() => setFullscreenConceptNote(null)}
+                onClick={() => setFullscreenNote(null)}
                 className="w-7 h-7 rounded flex items-center justify-center text-sm hover:bg-white/10 transition-colors"
                 style={{ color: "var(--color-text-muted)" }}
                 title="Close (Esc)"
@@ -7375,20 +7461,15 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
             {/* Content area */}
             <div className="flex-1 overflow-auto p-6 fullscreen-note-content">
               <FeatureMentionField
-                initial={String(row.notes ?? "")}
-                initialFmt={(Array.isArray(row.notesFmt) ? row.notesFmt : []) as FmtRange[]}
+                initial={initialContent}
+                initialFmt={initialFmt}
                 onCommit={(text, fmt, collapsed, tables) => {
-                  const prev = (row.collapsedSections as Record<string, unknown>) ?? {};
-                  const prevTables = (row.embeddedTables as Record<string, unknown>) ?? {};
-                  const updated = {
-                    ...row,
-                    notes: text || null,
-                    notesFmt: fmt,
-                    ...(collapsed !== undefined ? { collapsedSections: { ...prev, notes: Object.keys(collapsed).length > 0 ? collapsed : undefined } } : {}),
-                    ...(tables !== undefined ? { embeddedTables: { ...prevTables, notes: Object.keys(tables).length > 0 ? tables : undefined } } : {}),
-                  };
-                  setFullscreenConceptNote(updated);
-                  applyLocalUpdate("concepts", updated, "Inline edit: notes");
+                  void persist(
+                    text || null,
+                    fmt,
+                    collapsed ?? (cached?.collapsedSections as Record<string, unknown> | undefined),
+                    tables ?? (cached?.embeddedTables as Record<string, unknown> | undefined)
+                  );
                 }}
                 tables={mentionTables}
                 fields={mentionFields}
@@ -7430,35 +7511,41 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
                 onCreateRef={() => {}}
                 tableDetails={data.data_tables as Array<Record<string, unknown>>}
                 placeholder="Notes... type ( to reference a table, field, or image"
-                initialCollapsed={((row.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {}).notes}
+                initialCollapsed={initialCollapsed}
                 onCollapsedChange={(collapsed) => {
-                  const prev = (row.collapsedSections as Record<string, unknown>) ?? {};
-                  const updated = { ...row, collapsedSections: { ...prev, notes: Object.keys(collapsed).length > 0 ? collapsed : undefined } };
-                  setFullscreenConceptNote(updated);
-                  applyLocalUpdate("concepts", updated, "Collapse state: notes");
+                  void persist(
+                    cached?.content ?? initialContent,
+                    cached?.notesFmt ?? initialFmt,
+                    collapsed,
+                    cached?.embeddedTables as Record<string, unknown> | undefined
+                  );
                 }}
-                initialTables={((row.embeddedTables as Record<string, Record<string, unknown>> | null) ?? {}).notes as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined}
+                initialTables={initialTables}
                 onTablesChange={(tbls) => {
-                  const prev = (row.embeddedTables as Record<string, unknown>) ?? {};
-                  const updated = { ...row, embeddedTables: { ...prev, notes: Object.keys(tbls).length > 0 ? tbls : undefined } };
-                  setFullscreenConceptNote(updated);
-                  applyLocalUpdate("concepts", updated, "Table change: notes");
+                  void persist(
+                    cached?.content ?? initialContent,
+                    cached?.notesFmt ?? initialFmt,
+                    cached?.collapsedSections as Record<string, unknown> | undefined,
+                    tbls
+                  );
                 }}
-                noteContext={{ feature: conceptName, featureColor: noteColor, field: "Notes", fieldColor: "#4ecb71" }}
+                noteContext={{ feature: entityName, featureColor: noteColor, field: tabCfg?.columns.find((c) => c.key === noteKey)?.label || "Notes", fieldColor: "#4ecb71" }}
               />
-              {/* ─── Images ─── */}
-              <div className="mt-4">
-                <FeatureImageGallery
-                  images={(Array.isArray(row.images) ? row.images : []) as Array<{ id: string; url: string; title: string; createdAt: string }>}
-                  featureId={row.conceptId as number}
-                  entityType="concepts"
-                  onUpdate={(images) => {
-                    const updated = { ...row, images };
-                    setFullscreenConceptNote(updated);
-                    applyLocalUpdate("concepts", updated, "Updated images");
-                  }}
-                />
-              </div>
+              {/* ─── Images (concepts-only legacy gallery — uses concepts.images column) ─── */}
+              {tabKey === "concepts" && (
+                <div className="mt-4">
+                  <FeatureImageGallery
+                    images={(Array.isArray(row.images) ? row.images : []) as Array<{ id: string; url: string; title: string; createdAt: string }>}
+                    featureId={eid}
+                    entityType="concepts"
+                    onUpdate={(images) => {
+                      const updated = { ...row, images };
+                      setFullscreenNote({ row: updated, tabKey, noteKey });
+                      applyLocalUpdate("concepts", updated, "Updated images");
+                    }}
+                  />
+                </div>
+              )}
             </div>
           </div>
         );

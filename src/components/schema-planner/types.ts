@@ -1,7 +1,7 @@
 export interface ColDef {
   key: string;
   label: string;
-  type: "text" | "textarea" | "int" | "boolean" | "enum" | "fk" | "multi-fk" | "tags" | "module-tags" | "readonly" | "checklist" | "ref-features" | "ref-projects" | "platforms" | "separator" | "module-rules" | "note-fullscreen" | "image-carousel" | "test-count" | "formula";
+  type: "text" | "textarea" | "int" | "boolean" | "enum" | "fk" | "multi-fk" | "tags" | "module-tags" | "readonly" | "checklist" | "ref-features" | "ref-projects" | "platforms" | "separator" | "module-rules" | "note-fullscreen" | "notes" | "image-carousel" | "test-count" | "formula";
   required?: boolean;
   options?: string[];
   fkTable?: string;
