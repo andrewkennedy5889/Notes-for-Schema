@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url';
 import { getDb } from './db.js';
 import { parseRow, prepareRow, camelToSnake } from './utils.js';
 import { authRouter, authMiddleware } from './auth.js';
+import { getAppMode, requireLocal } from './app-mode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,6 +41,14 @@ app.use(express.urlencoded({ extended: false }));
 // ─── Auth ────────────────────────────────────────────────────────────────────
 app.use(authRouter);
 app.use(authMiddleware);
+
+// ─── App-mode config (local vs hosted) ───────────────────────────────────────
+// Mode partitions dev-only features (shell-outs, filesystem writes, secret
+// rotation) from the consumer-facing hosted surface. Any route that is unsafe
+// to expose publicly must be wrapped in requireLocal.
+app.get('/api/config', (_req: Request, res: Response) => {
+  return void res.json({ mode: getAppMode() });
+});
 
 // ─── Static serving ──────────────────────────────────────────────────────────
 app.use('/images', express.static(IMAGE_STORAGE));
@@ -1135,7 +1144,7 @@ app.get('/api/projects/github-config', (_req: Request, res: Response) => {
   });
 });
 
-app.put('/api/projects/github-config', (req: Request, res: Response) => {
+app.put('/api/projects/github-config', requireLocal, (req: Request, res: Response) => {
   const { pat } = req.body as { pat: string };
   writeGithubConfig({ pat: pat ?? '' });
   return void res.json({ success: true });
@@ -1230,7 +1239,7 @@ function pruneResults() {
 }
 
 // ─── Agent launcher ──────────────────────────────────────────────────────────
-app.post('/api/agents/launch', (req: Request, res: Response) => {
+app.post('/api/agents/launch', requireLocal, (req: Request, res: Response) => {
   const { agentName, prompt, runId } = req.body as { agentName?: string; prompt?: string; runId?: string };
   if (!prompt || typeof prompt !== 'string') {
     return void res.status(400).json({ error: 'prompt is required' });
@@ -1577,8 +1586,8 @@ app.post('/api/sync/pull', async (_req: Request, res: Response) => {
   }
 });
 
-// Deploy code: git add, commit, push (dev-only)
-app.post('/api/sync/deploy-code', (req: Request, res: Response) => {
+// Deploy code: git add, commit, push (local-only — shells out to git)
+app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) => {
   if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
 
   const PROJECT_ROOT = path.join(__dirname, '..');

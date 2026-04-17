@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import AgentsTab from "../components/schema-planner/AgentsTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
-import { fetchSyncStatus, syncPush, syncPull, deployCode, type SyncStatus } from "../lib/api";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, type SyncStatus, type AppMode } from "../lib/api";
 
 const START_COMMANDS = [
   { cmd: "/nexus-start", desc: "Start or restart March Nexus dev server" },
@@ -164,6 +164,14 @@ export default function SchemaPlanner() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncLoading, setSyncLoading] = useState<'push' | 'pull' | 'deploy' | null>(null);
   const [syncResult, setSyncResult] = useState<string | null>(null);
+
+  // App mode (local vs hosted) — gates dev-only UI surfaces
+  const [appMode, setAppMode] = useState<AppMode>('local');
+  const isHosted = appMode === 'hosted';
+
+  useEffect(() => {
+    fetchAppConfig().then(c => setAppMode(c.mode)).catch(() => {});
+  }, []);
 
   // Load sync status on mount + poll every 60s
   useEffect(() => {
@@ -595,15 +603,44 @@ export default function SchemaPlanner() {
 
             {/* GitHub Integration */}
             <div className="mb-8">
-              <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--color-text)" }}>
-                GitHub Integration
-              </h3>
+              <div className="flex items-center gap-2 mb-3">
+                <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>
+                  GitHub Integration
+                </h3>
+                <span
+                  className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+                  style={{
+                    backgroundColor: isHosted ? "rgba(168,85,247,0.15)" : "rgba(78,203,113,0.15)",
+                    color: isHosted ? "#a855f7" : "#4ecb71",
+                    border: `1px solid ${isHosted ? "rgba(168,85,247,0.3)" : "rgba(78,203,113,0.3)"}`,
+                  }}
+                  title="APP_MODE — controls which endpoints are callable on this instance"
+                >
+                  {isHosted ? "HOSTED" : "LOCAL"}
+                </span>
+              </div>
               <p className="text-xs mb-4" style={{ color: "var(--color-text-muted)" }}>
                 Personal Access Token used to sync commits and manage repos from the Projects tab.
-                <br />Stored in a local config file in this project folder — never in the database or browser.
+                <br />Stored in a local config file in this project folder — never in the database, browser, or Data Sync payload.
               </p>
 
-              {githubPatSaved ? (
+              {isHosted ? (
+                <div className="flex items-center gap-3 mb-2">
+                  <span
+                    className="text-xs font-mono px-2 py-1 rounded"
+                    style={{
+                      backgroundColor: githubPatSaved ? "rgba(78,203,113,0.1)" : "rgba(148,163,184,0.1)",
+                      color: githubPatSaved ? "#4ecb71" : "var(--color-text-muted)",
+                      border: `1px solid ${githubPatSaved ? "rgba(78,203,113,0.2)" : "var(--color-divider)"}`,
+                    }}
+                  >
+                    {githubPatSaved ? `PAT configured: ${githubPatPreview}` : "No PAT on this instance"}
+                  </span>
+                  <span className="text-[10px]" style={{ color: "var(--color-text-subtle)" }}>
+                    Managed from the local instance — rotate it there.
+                  </span>
+                </div>
+              ) : githubPatSaved ? (
                 <div className="flex items-center gap-3 mb-2">
                   <span className="text-xs font-mono px-2 py-1 rounded" style={{ backgroundColor: "rgba(78,203,113,0.1)", color: "#4ecb71", border: "1px solid rgba(78,203,113,0.2)" }}>
                     PAT configured: {githubPatPreview}
@@ -730,19 +767,27 @@ export default function SchemaPlanner() {
                     >
                       {syncLoading === 'pull' ? "Pulling..." : "Pull Data"}
                     </button>
-                    <button
-                      onClick={handleDeployCode}
-                      disabled={!!syncLoading}
-                      className="px-4 py-2 text-xs rounded font-medium transition-colors"
-                      style={{
-                        backgroundColor: syncLoading === 'deploy' ? "rgba(168,85,247,0.05)" : "rgba(168,85,247,0.15)",
-                        color: "#a855f7",
-                        opacity: syncLoading && syncLoading !== 'deploy' ? 0.4 : 1,
-                      }}
-                    >
-                      {syncLoading === 'deploy' ? "Deploying..." : "Deploy Code"}
-                    </button>
+                    {!isHosted && (
+                      <button
+                        onClick={handleDeployCode}
+                        disabled={!!syncLoading}
+                        className="px-4 py-2 text-xs rounded font-medium transition-colors"
+                        style={{
+                          backgroundColor: syncLoading === 'deploy' ? "rgba(168,85,247,0.05)" : "rgba(168,85,247,0.15)",
+                          color: "#a855f7",
+                          opacity: syncLoading && syncLoading !== 'deploy' ? 0.4 : 1,
+                        }}
+                        title="Shells out to git on this server — only available on the local instance"
+                      >
+                        {syncLoading === 'deploy' ? "Deploying..." : "Deploy Code"}
+                      </button>
+                    )}
                   </div>
+                  {isHosted && (
+                    <p className="text-[10px] mt-1" style={{ color: "var(--color-text-subtle)" }}>
+                      Deploy Code is hidden on the hosted instance — run it from the local app.
+                    </p>
+                  )}
 
                   {/* Result message */}
                   {syncResult && (

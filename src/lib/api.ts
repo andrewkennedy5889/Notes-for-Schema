@@ -332,3 +332,17 @@ export async function deployCode(message?: string): Promise<{ success: boolean; 
   });
   return res.json();
 }
+
+// ─── App mode (local vs hosted) ──────────────────────────────────────────────
+
+export type AppMode = 'local' | 'hosted';
+
+export interface AppConfig {
+  mode: AppMode;
+}
+
+export async function fetchAppConfig(): Promise<AppConfig> {
+  const res = await fetch(`${BASE}/config`);
+  if (!res.ok) throw new Error(`fetchAppConfig failed: ${res.statusText}`);
+  return res.json();
+}
