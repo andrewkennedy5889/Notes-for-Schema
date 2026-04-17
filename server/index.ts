@@ -1553,10 +1553,29 @@ app.get('/api/sync/remote-status', async (_req: Request, res: Response) => {
 });
 
 // Push local → remote
-app.post('/api/sync/push', async (_req: Request, res: Response) => {
+app.post('/api/sync/push', async (req: Request, res: Response) => {
   if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
   const auth = getSyncAuth();
   if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
+
+  // Server-side guardrail: reject push if remote has unsynced changes, unless ?force=true
+  const force = req.query.force === 'true' || (req.body as { force?: boolean })?.force === true;
+  if (!force) {
+    try {
+      const remote = await fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } });
+      if (remote.ok) {
+        const s = await remote.json() as { changeCount: number };
+        if (s.changeCount > 0) {
+          return void res.status(409).json({
+            error: `Remote has ${s.changeCount} unsynced change(s). Pull first, or retry with force=true to overwrite remote.`,
+            conflict: true,
+            remoteChangeCount: s.changeCount,
+          });
+        }
+      }
+    } catch { /* if we can't reach remote status, fall through to the push itself which will fail cleanly */ }
+  }
+
   backupDatabase();
 
   try {
@@ -1599,10 +1618,31 @@ app.post('/api/sync/push', async (_req: Request, res: Response) => {
 });
 
 // Pull remote → local
-app.post('/api/sync/pull', async (_req: Request, res: Response) => {
+app.post('/api/sync/pull', async (req: Request, res: Response) => {
   if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
   const auth = getSyncAuth();
   if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
+
+  // Server-side guardrail: reject pull if local has unsynced changes, unless ?force=true
+  const force = req.query.force === 'true' || (req.body as { force?: boolean })?.force === true;
+  if (!force) {
+    const dbCheck = getDb();
+    const lastSync = dbCheck.prepare('SELECT synced_at FROM _splan_sync_meta ORDER BY synced_at DESC LIMIT 1')
+      .get() as { synced_at: string } | undefined;
+    if (lastSync) {
+      const localCount = (dbCheck.prepare(
+        'SELECT COUNT(*) as cnt FROM _splan_change_log WHERE changed_at > ?'
+      ).get(lastSync.synced_at) as { cnt: number }).cnt;
+      if (localCount > 0) {
+        return void res.status(409).json({
+          error: `Local has ${localCount} unsynced change(s). Push first, or retry with force=true to discard local changes.`,
+          conflict: true,
+          localChangeCount: localCount,
+        });
+      }
+    }
+  }
+
   backupDatabase();
 
   try {
@@ -1689,6 +1729,167 @@ app.post('/api/sync/pull', async (_req: Request, res: Response) => {
     } catch { /* non-critical — remote badge may stay yellow until next push */ }
 
     return void res.json({ success: true, totalRows });
+  } catch (e: unknown) {
+    return void res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+// ─── GET /api/sync/diff — per-table diff of local vs remote ──────────────────
+// Drives the conflict-resolution UI. Compares rows by primary key across every
+// _splan_ table, then consults both sides' change logs to classify
+// added/deleted/edited and flag record-level + field-level conflicts.
+app.get('/api/sync/diff', async (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
+  const auth = getSyncAuth();
+  if (!auth) return void res.status(400).json({ error: 'Sync not configured' });
+
+  try {
+    const db = getDb();
+
+    // 1. Remote full DB + remote change log
+    const [exportRes, statusRes] = await Promise.all([
+      fetch(`${auth.baseUrl}/api/db-export`, { headers: { Cookie: auth.cookie } }),
+      fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } }),
+    ]);
+    if (!exportRes.ok) return void res.status(500).json({ error: `Remote export failed: ${exportRes.status}` });
+    if (!statusRes.ok) return void res.status(500).json({ error: `Remote status failed: ${statusRes.status}` });
+
+    const { tables: remoteTables } = await exportRes.json() as { tables: Record<string, Record<string, unknown>[]> };
+    const remoteStatus = await statusRes.json() as {
+      changesSinceSync: Array<{ entity_type: string; entity_id: number; action: string; field_changed: string | null }>;
+    };
+
+    // 2. Local change log since last sync
+    const lastSync = db.prepare('SELECT * FROM _splan_sync_meta ORDER BY synced_at DESC LIMIT 1')
+      .get() as { synced_at: string } | undefined;
+    const localChanges = lastSync
+      ? db.prepare(
+          `SELECT entity_type, entity_id, action, field_changed
+           FROM _splan_change_log WHERE changed_at > ?`
+        ).all(lastSync.synced_at) as Array<{ entity_type: string; entity_id: number; action: string; field_changed: string | null }>
+      : [];
+
+    // 3. Build change-log indexes: entity_type → id → { actions, fields }
+    type ChangeIndex = Map<string, Map<number, { deleted: boolean; created: boolean; fields: Set<string> }>>;
+    const buildIndex = (changes: typeof localChanges): ChangeIndex => {
+      const idx: ChangeIndex = new Map();
+      for (const c of changes) {
+        if (!idx.has(c.entity_type)) idx.set(c.entity_type, new Map());
+        const byId = idx.get(c.entity_type)!;
+        const rec = byId.get(c.entity_id) || { deleted: false, created: false, fields: new Set<string>() };
+        if (c.action === 'delete') rec.deleted = true;
+        if (c.action === 'create') rec.created = true;
+        if (c.field_changed) rec.fields.add(c.field_changed);
+        byId.set(c.entity_id, rec);
+      }
+      return idx;
+    };
+    const localIdx = buildIndex(localChanges);
+    const remoteIdx = buildIndex(remoteStatus.changesSinceSync);
+
+    // 4. Per-table diff
+    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta', '_splan_change_log']);
+    const IGNORE_FIELDS = new Set(['updated_at', 'created_at']);
+    const tablesOut: Array<Record<string, unknown>> = [];
+
+    for (const [tableName, meta] of Object.entries(TABLE_MAP)) {
+      if (SKIP.has(tableName)) continue;
+      const idCol = meta.idCol;
+      const entityType = meta.entityType;
+
+      const localRows = db.prepare(`SELECT * FROM ${tableName}`).all() as Record<string, unknown>[];
+      const remoteRows = remoteTables[tableName] || [];
+
+      // Guess a name column: {entityType}_name, then common fallbacks
+      const sampleRow = localRows[0] || remoteRows[0];
+      const nameCol = sampleRow
+        ? [`${entityType}_name`, 'name', 'title', 'label', 'field_name', 'table_name'].find(c => c in sampleRow) || null
+        : null;
+
+      const localById = new Map<string | number, Record<string, unknown>>();
+      for (const r of localRows) { const k = r[idCol] as string | number; if (k != null) localById.set(k, r); }
+      const remoteById = new Map<string | number, Record<string, unknown>>();
+      for (const r of remoteRows) { const k = r[idCol] as string | number; if (k != null) remoteById.set(k, r); }
+
+      const allIds = new Set<string | number>([...localById.keys(), ...remoteById.keys()]);
+      const localChangeMap = localIdx.get(entityType) || new Map();
+      const remoteChangeMap = remoteIdx.get(entityType) || new Map();
+
+      const edits: Array<Record<string, unknown>> = [];
+      const added: Array<Record<string, unknown>> = [];
+      const deleted: Array<Record<string, unknown>> = [];
+
+      for (const id of allIds) {
+        const l = localById.get(id);
+        const r = remoteById.get(id);
+        const lChange = localChangeMap.get(Number(id));
+        const rChange = remoteChangeMap.get(Number(id));
+
+        if (l && r) {
+          // Compare fields
+          const fieldKeys = new Set([...Object.keys(l), ...Object.keys(r)]);
+          const changes: Array<Record<string, unknown>> = [];
+          for (const f of fieldKeys) {
+            if (IGNORE_FIELDS.has(f)) continue;
+            const lv = l[f];
+            const rv = r[f];
+            if (lv === rv) continue;
+            // Normalize null/undefined/empty-string comparison
+            const lNorm = lv == null ? '' : String(lv);
+            const rNorm = rv == null ? '' : String(rv);
+            if (lNorm === rNorm) continue;
+            const fieldConflict = !!(lChange?.fields.has(f) && rChange?.fields.has(f));
+            changes.push({ field: f, local: lNorm, remote: rNorm, fieldConflict });
+          }
+          if (changes.length > 0) {
+            const recordConflict = !!(lChange && rChange && !lChange.deleted && !rChange.deleted);
+            edits.push({
+              id,
+              name: nameCol ? String(l[nameCol] ?? r[nameCol] ?? '') : '',
+              recordConflict,
+              changes,
+            });
+          }
+        } else if (l && !r) {
+          // Exists locally only → added-local OR deleted-remote
+          const side = rChange?.deleted ? 'remote-deleted' : 'local';
+          const bucket = side === 'remote-deleted' ? deleted : added;
+          bucket.push({
+            id,
+            name: nameCol ? String(l[nameCol] ?? '') : '',
+            side: side === 'remote-deleted' ? 'remote' : 'local',
+          });
+        } else if (!l && r) {
+          // Exists remotely only → added-remote OR deleted-local
+          const side = lChange?.deleted ? 'local-deleted' : 'remote';
+          const bucket = side === 'local-deleted' ? deleted : added;
+          bucket.push({
+            id,
+            name: nameCol ? String(r[nameCol] ?? '') : '',
+            side: side === 'local-deleted' ? 'local' : 'remote',
+          });
+        }
+      }
+
+      if (edits.length === 0 && added.length === 0 && deleted.length === 0) continue;
+
+      // Sort: conflicts to top, then by name
+      edits.sort((a, b) => {
+        const ac = a.recordConflict ? 0 : 1;
+        const bc = b.recordConflict ? 0 : 1;
+        if (ac !== bc) return ac - bc;
+        return String(a.name).localeCompare(String(b.name));
+      });
+
+      // Label: strip _splan_ prefix, title-case
+      const label = tableName.replace(/^_splan_/, '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+      tablesOut.push({ tableName, label, idCol, nameCol, edits, added, deleted });
+    }
+
+    const hasConflict = (localChanges.length > 0) && (remoteStatus.changesSinceSync.length > 0);
+
+    return void res.json({ hasConflict, tables: tablesOut });
   } catch (e: unknown) {
     return void res.status(500).json({ error: (e as Error).message });
   }

@@ -4,7 +4,8 @@ import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import AgentsTab from "../components/schema-planner/AgentsTab";
 import NotebookTab from "../components/schema-planner/NotebookTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
-import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, type SyncStatus, type AppMode } from "../lib/api";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, type SyncStatus, type AppMode, type SyncDiff } from "../lib/api";
+import SyncDiffViewer from "../components/schema-planner/SyncDiffViewer";
 
 const START_COMMANDS = [
   { cmd: "/nexus-start", desc: "Start or restart March Nexus dev server" },
@@ -166,9 +167,11 @@ export default function SchemaPlanner() {
 
   // Sync state
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
-  const [syncLoading, setSyncLoading] = useState<'push' | 'pull' | 'deploy' | null>(null);
+  const [syncLoading, setSyncLoading] = useState<'push' | 'pull' | 'deploy' | 'diff' | null>(null);
   const [syncResult, setSyncResult] = useState<string | null>(null);
   const [deployProgress, setDeployProgress] = useState<{ status: string; elapsed: number; targetCommit: string } | null>(null);
+  const [syncDiff, setSyncDiff] = useState<SyncDiff | null>(null);
+  const [showDiff, setShowDiff] = useState(false);
 
   // App mode (local vs hosted) — gates dev-only UI surfaces
   const [appMode, setAppMode] = useState<AppMode>('local');
@@ -186,13 +189,15 @@ export default function SchemaPlanner() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleSyncPush = useCallback(async () => {
+  const handleSyncPush = useCallback(async (force = false) => {
     setSyncLoading('push');
     setSyncResult(null);
     try {
-      const result = await syncPush();
+      const result = await syncPush(force ? { force: true } : undefined);
       if (result.success) {
-        setSyncResult(`Pushed ${result.totalRows} rows to remote`);
+        setSyncResult(force ? `Force-pushed ${result.totalRows} rows to remote (remote changes discarded)` : `Pushed ${result.totalRows} rows to remote`);
+        setSyncDiff(null);
+        setShowDiff(false);
       } else {
         setSyncResult(`Push failed: ${result.error}`);
       }
@@ -204,13 +209,15 @@ export default function SchemaPlanner() {
     }
   }, []);
 
-  const handleSyncPull = useCallback(async () => {
+  const handleSyncPull = useCallback(async (force = false) => {
     setSyncLoading('pull');
     setSyncResult(null);
     try {
-      const result = await syncPull();
+      const result = await syncPull(force ? { force: true } : undefined);
       if (result.success) {
-        setSyncResult(`Pulled ${result.totalRows} rows from remote`);
+        setSyncResult(force ? `Force-pulled ${result.totalRows} rows from remote (local changes discarded)` : `Pulled ${result.totalRows} rows from remote`);
+        setSyncDiff(null);
+        setShowDiff(false);
       } else {
         setSyncResult(`Pull failed: ${result.error}`);
       }
@@ -221,6 +228,32 @@ export default function SchemaPlanner() {
       setSyncLoading(null);
     }
   }, []);
+
+  const handleLoadDiff = useCallback(async () => {
+    setSyncLoading('diff');
+    setSyncResult(null);
+    try {
+      const diff = await fetchSyncDiff();
+      setSyncDiff(diff);
+      setShowDiff(true);
+    } catch (e) {
+      setSyncResult(`Diff failed: ${(e as Error).message}`);
+    } finally {
+      setSyncLoading(null);
+    }
+  }, []);
+
+  const handleForcePush = useCallback(async () => {
+    const remoteCount = syncStatus?.remote?.changeCount ?? 0;
+    if (!window.confirm(`Force push will DISCARD ${remoteCount} remote change(s). This cannot be undone. Continue?`)) return;
+    await handleSyncPush(true);
+  }, [syncStatus, handleSyncPush]);
+
+  const handleForcePull = useCallback(async () => {
+    const localCount = syncStatus?.local?.changeCount ?? 0;
+    if (!window.confirm(`Force pull will DISCARD ${localCount} local change(s). This cannot be undone. Continue?`)) return;
+    await handleSyncPull(true);
+  }, [syncStatus, handleSyncPull]);
 
   const handleDeployCode = useCallback(async () => {
     setSyncLoading('deploy');
@@ -863,16 +896,30 @@ export default function SchemaPlanner() {
                   </div>
 
                   {/* Change warnings */}
-                  {(syncStatus.remote?.changeCount ?? 0) > 0 && (
-                    <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(242,182,97,0.1)", border: "1px solid rgba(242,182,97,0.3)", color: "#f2b661" }}>
-                      Remote has {syncStatus.remote!.changeCount} change(s) since last sync — pull before pushing to avoid overwriting.
-                    </div>
-                  )}
-                  {(syncStatus.local?.changeCount ?? 0) > 0 && (
-                    <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(66,139,202,0.1)", border: "1px solid rgba(66,139,202,0.3)", color: "#428bca" }}>
-                      Local has {syncStatus.local!.changeCount} change(s) since last sync — push to update remote.
-                    </div>
-                  )}
+                  {(() => {
+                    const remoteCount = syncStatus.remote?.changeCount ?? 0;
+                    const localCount = syncStatus.local?.changeCount ?? 0;
+                    const conflict = remoteCount > 0 && localCount > 0;
+                    return (
+                      <>
+                        {conflict && (
+                          <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(224,85,85,0.1)", border: "1px solid rgba(224,85,85,0.3)", color: "#e05555" }}>
+                            <strong>Conflict:</strong> both sides have changes ({localCount} local, {remoteCount} remote). Push and Pull are disabled — review the differences and pick a side to force, or resolve manually.
+                          </div>
+                        )}
+                        {!conflict && remoteCount > 0 && (
+                          <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(242,182,97,0.1)", border: "1px solid rgba(242,182,97,0.3)", color: "#f2b661" }}>
+                            Remote has {remoteCount} change(s) since last sync — Push is disabled. Pull to fast-forward.
+                          </div>
+                        )}
+                        {!conflict && localCount > 0 && (
+                          <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(66,139,202,0.1)", border: "1px solid rgba(66,139,202,0.3)", color: "#428bca" }}>
+                            Local has {localCount} change(s) since last sync — Pull is disabled. Push to update remote.
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
 
                   {syncStatus.error && (
                     <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(224,85,85,0.1)", border: "1px solid rgba(224,85,85,0.3)", color: "#e05555" }}>
@@ -881,47 +928,115 @@ export default function SchemaPlanner() {
                   )}
 
                   {/* Buttons */}
-                  <div className="flex items-center gap-3 mb-2">
-                    <button
-                      onClick={handleSyncPush}
-                      disabled={!!syncLoading}
-                      className="px-4 py-2 text-xs rounded font-medium transition-colors"
-                      style={{
-                        backgroundColor: syncLoading === 'push' ? "rgba(78,203,113,0.05)" : "rgba(78,203,113,0.15)",
-                        color: "#4ecb71",
-                        opacity: syncLoading && syncLoading !== 'push' ? 0.4 : 1,
-                      }}
-                    >
-                      {syncLoading === 'push' ? "Pushing..." : "Push Data"}
-                    </button>
-                    <button
-                      onClick={handleSyncPull}
-                      disabled={!!syncLoading}
-                      className="px-4 py-2 text-xs rounded font-medium transition-colors"
-                      style={{
-                        backgroundColor: syncLoading === 'pull' ? "rgba(66,139,202,0.05)" : "rgba(66,139,202,0.15)",
-                        color: "#428bca",
-                        opacity: syncLoading && syncLoading !== 'pull' ? 0.4 : 1,
-                      }}
-                    >
-                      {syncLoading === 'pull' ? "Pulling..." : "Pull Data"}
-                    </button>
-                    {!isHosted && (
-                      <button
-                        onClick={handleDeployCode}
-                        disabled={!!syncLoading}
-                        className="px-4 py-2 text-xs rounded font-medium transition-colors"
-                        style={{
-                          backgroundColor: syncLoading === 'deploy' ? "rgba(168,85,247,0.05)" : "rgba(168,85,247,0.15)",
-                          color: "#a855f7",
-                          opacity: syncLoading && syncLoading !== 'deploy' ? 0.4 : 1,
-                        }}
-                        title="Shells out to git on this server — only available on the local instance"
-                      >
-                        {syncLoading === 'deploy' ? "Deploying..." : "Deploy Code"}
-                      </button>
-                    )}
-                  </div>
+                  {(() => {
+                    const remoteCount = syncStatus.remote?.changeCount ?? 0;
+                    const localCount = syncStatus.local?.changeCount ?? 0;
+                    const conflict = remoteCount > 0 && localCount > 0;
+                    const pushBlocked = remoteCount > 0;  // blocked if remote has changes
+                    const pullBlocked = localCount > 0;   // blocked if local has changes
+                    const hasAnyChanges = remoteCount > 0 || localCount > 0;
+
+                    return (
+                      <>
+                        <div className="flex items-center gap-3 mb-2 flex-wrap">
+                          <button
+                            onClick={() => handleSyncPush()}
+                            disabled={!!syncLoading || pushBlocked}
+                            className="px-4 py-2 text-xs rounded font-medium transition-colors"
+                            style={{
+                              backgroundColor: syncLoading === 'push' ? "rgba(78,203,113,0.05)" : "rgba(78,203,113,0.15)",
+                              color: "#4ecb71",
+                              opacity: (syncLoading && syncLoading !== 'push') || pushBlocked ? 0.35 : 1,
+                              cursor: pushBlocked ? "not-allowed" : undefined,
+                            }}
+                            title={pushBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Remote has unsynced changes. Pull first.") : "Push local data to remote"}
+                          >
+                            {syncLoading === 'push' ? "Pushing..." : "Push Data"}
+                          </button>
+                          <button
+                            onClick={() => handleSyncPull()}
+                            disabled={!!syncLoading || pullBlocked}
+                            className="px-4 py-2 text-xs rounded font-medium transition-colors"
+                            style={{
+                              backgroundColor: syncLoading === 'pull' ? "rgba(66,139,202,0.05)" : "rgba(66,139,202,0.15)",
+                              color: "#428bca",
+                              opacity: (syncLoading && syncLoading !== 'pull') || pullBlocked ? 0.35 : 1,
+                              cursor: pullBlocked ? "not-allowed" : undefined,
+                            }}
+                            title={pullBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Local has unsynced changes. Push first.") : "Pull remote data to local"}
+                          >
+                            {syncLoading === 'pull' ? "Pulling..." : "Pull Data"}
+                          </button>
+                          {!isHosted && (
+                            <button
+                              onClick={handleDeployCode}
+                              disabled={!!syncLoading}
+                              className="px-4 py-2 text-xs rounded font-medium transition-colors"
+                              style={{
+                                backgroundColor: syncLoading === 'deploy' ? "rgba(168,85,247,0.05)" : "rgba(168,85,247,0.15)",
+                                color: "#a855f7",
+                                opacity: syncLoading && syncLoading !== 'deploy' ? 0.4 : 1,
+                              }}
+                              title="Shells out to git on this server — only available on the local instance"
+                            >
+                              {syncLoading === 'deploy' ? "Deploying..." : "Deploy Code"}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Diff / override controls */}
+                        {hasAnyChanges && (
+                          <div className="flex items-center gap-3 mb-2 flex-wrap">
+                            <button
+                              onClick={handleLoadDiff}
+                              disabled={!!syncLoading}
+                              className="px-3 py-1.5 text-xs rounded transition-colors"
+                              style={{
+                                backgroundColor: "rgba(255,255,255,0.04)",
+                                border: "1px solid var(--color-divider)",
+                                color: "var(--color-text-muted)",
+                              }}
+                            >
+                              {syncLoading === 'diff' ? "Loading diff..." : showDiff && syncDiff ? "Refresh Differences" : "View Differences"}
+                            </button>
+                            {conflict && (
+                              <>
+                                <button
+                                  onClick={handleForcePush}
+                                  disabled={!!syncLoading}
+                                  className="px-3 py-1.5 text-xs rounded font-medium transition-colors"
+                                  style={{
+                                    backgroundColor: "rgba(224,85,85,0.1)",
+                                    border: "1px solid rgba(224,85,85,0.4)",
+                                    color: "#e05555",
+                                  }}
+                                  title="Overwrite remote with local — destroys all remote changes since last sync"
+                                >
+                                  Force Push (discard {remoteCount} remote)
+                                </button>
+                                <button
+                                  onClick={handleForcePull}
+                                  disabled={!!syncLoading}
+                                  className="px-3 py-1.5 text-xs rounded font-medium transition-colors"
+                                  style={{
+                                    backgroundColor: "rgba(224,85,85,0.1)",
+                                    border: "1px solid rgba(224,85,85,0.4)",
+                                    color: "#e05555",
+                                  }}
+                                  title="Overwrite local with remote — destroys all local changes since last sync"
+                                >
+                                  Force Pull (discard {localCount} local)
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Diff viewer */}
+                        {showDiff && syncDiff && <SyncDiffViewer diff={syncDiff} />}
+                      </>
+                    );
+                  })()}
                   {isHosted && (
                     <p className="text-[10px] mt-1" style={{ color: "var(--color-text-subtle)" }}>
                       Deploy Code is hidden on the hosted instance — run it from the local app.

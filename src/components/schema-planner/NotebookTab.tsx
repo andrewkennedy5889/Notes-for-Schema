@@ -11,6 +11,7 @@ interface Note {
 
 const COLORS = ["#ffffff", "#f2b661", "#5bc0de", "#4ecb71", "#a855f7", "#e05555", "#e67d4a", "#428bca"];
 const HIGHLIGHTS = ["transparent", "#f2b66140", "#5bc0de40", "#4ecb7140", "#a855f740", "#e0555540"];
+const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 40];
 
 export default function NotebookTab() {
   const [notes, setNotes] = useState<Note[]>([]);
@@ -90,6 +91,24 @@ export default function NotebookTab() {
   // Formatting commands
   const execCmd = (cmd: string, value?: string) => {
     document.execCommand(cmd, false, value);
+    editorRef.current?.focus();
+    handleInput();
+  };
+
+  // Per-selection font size: use legacy fontSize=7 to wrap selection,
+  // then swap the resulting <font> tags for <span style="font-size: Xpx">
+  // so we get arbitrary pixel sizes instead of the 1–7 preset scale.
+  const setFontSize = (px: number) => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    document.execCommand("fontSize", false, "7");
+    const fonts = editorRef.current?.querySelectorAll('font[size="7"]');
+    fonts?.forEach((f) => {
+      const span = document.createElement("span");
+      span.style.fontSize = `${px}px`;
+      span.innerHTML = (f as HTMLElement).innerHTML;
+      f.replaceWith(span);
+    });
     editorRef.current?.focus();
     handleInput();
   };
@@ -244,6 +263,27 @@ export default function NotebookTab() {
               <button onClick={() => execCmd("italic")} className="px-2 py-1 text-xs italic rounded hover:bg-white/10" style={{ color: "var(--color-text)" }} title="Italic">I</button>
               <button onClick={() => execCmd("underline")} className="px-2 py-1 text-xs underline rounded hover:bg-white/10" style={{ color: "var(--color-text)" }} title="Underline">U</button>
               <button onClick={() => execCmd("strikeThrough")} className="px-2 py-1 text-xs line-through rounded hover:bg-white/10" style={{ color: "var(--color-text)" }} title="Strikethrough">S</button>
+
+              <span className="w-px h-4 mx-1" style={{ background: "var(--color-divider)" }} />
+
+              {/* Font size — applies to current selection */}
+              <span className="text-[10px] mr-1" style={{ color: "var(--color-text-subtle)" }}>Size:</span>
+              <select
+                onChange={(e) => {
+                  const px = Number(e.target.value);
+                  if (px > 0) setFontSize(px);
+                  e.target.value = "";
+                }}
+                defaultValue=""
+                className="px-1 py-0.5 text-xs rounded border bg-transparent outline-none"
+                style={{ color: "var(--color-text)", borderColor: "var(--color-divider)", background: "var(--color-surface)" }}
+                title="Set font size for selected text"
+              >
+                <option value="" disabled>Aa</option>
+                {FONT_SIZES.map((s) => (
+                  <option key={s} value={s}>{s}px</option>
+                ))}
+              </select>
 
               <span className="w-px h-4 mx-1" style={{ background: "var(--color-divider)" }} />
 

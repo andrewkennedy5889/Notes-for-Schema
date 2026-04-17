@@ -314,13 +314,62 @@ export async function fetchSyncStatus(): Promise<SyncStatus> {
   return res.json();
 }
 
-export async function syncPush(): Promise<{ success: boolean; totalRows: number; error?: string }> {
-  const res = await fetch(`${BASE}/sync/push`, { method: 'POST' });
+export async function syncPush(opts?: { force?: boolean }): Promise<{ success: boolean; totalRows: number; error?: string; conflict?: boolean; remoteChangeCount?: number }> {
+  const url = opts?.force ? `${BASE}/sync/push?force=true` : `${BASE}/sync/push`;
+  const res = await fetch(url, { method: 'POST' });
   return res.json();
 }
 
-export async function syncPull(): Promise<{ success: boolean; totalRows: number; error?: string }> {
-  const res = await fetch(`${BASE}/sync/pull`, { method: 'POST' });
+export async function syncPull(opts?: { force?: boolean }): Promise<{ success: boolean; totalRows: number; error?: string; conflict?: boolean; localChangeCount?: number }> {
+  const url = opts?.force ? `${BASE}/sync/pull?force=true` : `${BASE}/sync/pull`;
+  const res = await fetch(url, { method: 'POST' });
+  return res.json();
+}
+
+// ─── Sync diff ───────────────────────────────────────────────────────────────
+
+export interface SyncDiffChange {
+  field: string;
+  local: string;
+  remote: string;
+  fieldConflict: boolean;
+}
+
+export interface SyncDiffEdit {
+  id: string | number;
+  name: string;
+  recordConflict: boolean;
+  changes: SyncDiffChange[];
+}
+
+export interface SyncDiffSideRecord {
+  id: string | number;
+  name: string;
+  side: 'local' | 'remote';
+}
+
+export interface SyncDiffTable {
+  tableName: string;
+  label: string;
+  idCol: string;
+  nameCol: string | null;
+  edits: SyncDiffEdit[];
+  added: SyncDiffSideRecord[];
+  deleted: SyncDiffSideRecord[];
+}
+
+export interface SyncDiff {
+  hasConflict: boolean;
+  tables: SyncDiffTable[];
+  error?: string;
+}
+
+export async function fetchSyncDiff(): Promise<SyncDiff> {
+  const res = await fetch(`${BASE}/sync/diff`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    return { hasConflict: false, tables: [], error: err.error || res.statusText };
+  }
   return res.json();
 }
 
