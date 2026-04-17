@@ -346,3 +346,12 @@ export async function fetchAppConfig(): Promise<AppConfig> {
   if (!res.ok) throw new Error(`fetchAppConfig failed: ${res.statusText}`);
   return res.json();
 }
+
+export async function fetchVersion(baseUrl?: string): Promise<{ commit: string | null }> {
+  const url = baseUrl ? `${baseUrl}/api/version` : `${BASE}/version`;
+  try {
+    const res = await fetch(url, { credentials: baseUrl ? 'omit' : 'same-origin' });
+    if (!res.ok) return { commit: null };
+    return res.json();
+  } catch { return { commit: null }; }
+}

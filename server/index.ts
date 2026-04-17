@@ -1636,6 +1636,16 @@ app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) =>
   });
 });
 
+// ─── GET /api/version — current git commit hash ────────────────────────────
+app.get('/api/version', (_req: Request, res: Response) => {
+  const PROJECT_ROOT = path.join(__dirname, '..');
+  const execOpts = { cwd: PROJECT_ROOT, shell: os.platform() === 'win32' ? 'cmd.exe' : undefined } as const;
+  exec('git rev-parse --short HEAD', execOpts, (err, stdout) => {
+    if (err) return void res.json({ commit: null });
+    return void res.json({ commit: stdout.trim() });
+  });
+});
+
 // ─── GET /api/db-export — bulk export all tables ────────────────────────────
 app.get('/api/db-export', (_req: Request, res: Response) => {
   const db = getDb();

@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import AgentsTab from "../components/schema-planner/AgentsTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
-import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, type SyncStatus, type AppMode } from "../lib/api";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, type SyncStatus, type AppMode } from "../lib/api";
 
 const START_COMMANDS = [
   { cmd: "/nexus-start", desc: "Start or restart March Nexus dev server" },
@@ -164,6 +164,7 @@ export default function SchemaPlanner() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncLoading, setSyncLoading] = useState<'push' | 'pull' | 'deploy' | null>(null);
   const [syncResult, setSyncResult] = useState<string | null>(null);
+  const [deployProgress, setDeployProgress] = useState<{ status: string; elapsed: number; targetCommit: string } | null>(null);
 
   // App mode (local vs hosted) — gates dev-only UI surfaces
   const [appMode, setAppMode] = useState<AppMode>('local');
@@ -220,22 +221,70 @@ export default function SchemaPlanner() {
   const handleDeployCode = useCallback(async () => {
     setSyncLoading('deploy');
     setSyncResult(null);
+    setDeployProgress(null);
     try {
       const result = await deployCode();
-      if (result.success) {
-        const detail = result.status === 'nothing' ? result.message
-          : result.filesChanged ? `Deployed ${result.filesChanged} file(s) — ${result.commitHash || 'pushed'}`
-          : result.message;
-        setSyncResult(detail);
-      } else {
+      if (!result.success) {
         setSyncResult(`Deploy failed: ${result.error}`);
+        setSyncLoading(null);
+        return;
       }
+      if (result.status === 'nothing') {
+        setSyncResult(result.message);
+        setSyncLoading(null);
+        return;
+      }
+
+      const targetCommit = result.commitHash || '';
+      const startTime = Date.now();
+      setDeployProgress({ status: 'Pushed — waiting for Railway build...', elapsed: 0, targetCommit });
+      setSyncLoading(null);
+
+      // Poll remote /api/version every 10s until commit matches or 5min timeout
+      const remoteUrl = syncStatus?.remoteUrl || '';
+      if (!remoteUrl || !targetCommit) {
+        setSyncResult(`Pushed ${result.filesChanged} file(s) — ${targetCommit}`);
+        setDeployProgress(null);
+        return;
+      }
+
+      const poll = setInterval(async () => {
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        try {
+          const remote = await fetchVersion(remoteUrl);
+          if (remote.commit === targetCommit) {
+            clearInterval(poll);
+            setDeployProgress(null);
+            setSyncResult(`Live — commit ${targetCommit} (${elapsed}s)`);
+            return;
+          }
+          // Still building/deploying
+          const mins = Math.floor(elapsed / 60);
+          const secs = elapsed % 60;
+          const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+          setDeployProgress({
+            status: elapsed < 120 ? `Building on Railway... ${timeStr}` : `Deploying... ${timeStr}`,
+            elapsed,
+            targetCommit,
+          });
+        } catch {
+          // Remote might be temporarily down during deploy swap
+          const elapsed2 = Math.round((Date.now() - startTime) / 1000);
+          setDeployProgress({ status: `Deploying... ${elapsed2}s`, elapsed: elapsed2, targetCommit });
+        }
+
+        // Timeout after 5 minutes
+        if (elapsed > 300) {
+          clearInterval(poll);
+          setDeployProgress(null);
+          setSyncResult(`Pushed ${targetCommit} — deploy may still be in progress. Check Railway dashboard.`);
+        }
+      }, 10000);
     } catch (e) {
       setSyncResult(`Deploy failed: ${(e as Error).message}`);
-    } finally {
       setSyncLoading(null);
     }
-  }, []);
+  }, [syncStatus?.remoteUrl]);
 
   // Load PAT status from server on mount
   useEffect(() => {
@@ -789,9 +838,17 @@ export default function SchemaPlanner() {
                     </p>
                   )}
 
+                  {/* Deploy progress */}
+                  {deployProgress && (
+                    <div className="flex items-center gap-2 mt-2 text-xs" style={{ color: "#a855f7" }}>
+                      <span className="inline-block w-3 h-3 rounded-full animate-pulse" style={{ backgroundColor: "#a855f7" }} />
+                      {deployProgress.status}
+                    </div>
+                  )}
+
                   {/* Result message */}
-                  {syncResult && (
-                    <p className="text-xs mt-2" style={{ color: syncResult.includes('failed') ? "#e05555" : "#4ecb71" }}>
+                  {syncResult && !deployProgress && (
+                    <p className="text-xs mt-2" style={{ color: syncResult.includes('failed') ? "#e05555" : syncResult.startsWith('Live') ? "#a855f7" : "#4ecb71" }}>
                       {syncResult}
                     </p>
                   )}
