@@ -51,6 +51,20 @@ app.get('/api/config', (_req: Request, res: Response) => {
   return void res.json({ mode: getAppMode() });
 });
 
+app.get('/api/claude-md-stats', (_req: Request, res: Response) => {
+  const filePath = path.join(process.cwd(), 'CLAUDE.md');
+  try {
+    const stat = fs.statSync(filePath);
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split(/\r?\n/).length;
+    return void res.json({ lines, bytes: stat.size, mtime: stat.mtimeMs, path: filePath });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return void res.status(404).json({ error: 'CLAUDE.md not found', path: filePath });
+    return void res.status(500).json({ error: 'Failed to read CLAUDE.md' });
+  }
+});
+
 // ─── Static serving ──────────────────────────────────────────────────────────
 app.use('/images', express.static(IMAGE_STORAGE));
 app.use('/prototypes', express.static(path.join(__dirname, '..', 'prototypes')));
@@ -2358,7 +2372,19 @@ app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) =>
 });
 
 // ─── GET /api/version — current git commit hash ────────────────────────────
+// Prefer platform-provided build-time env vars (Railway, Vercel, Render) since
+// hosted containers typically have no .git directory. Fall back to git CLI for
+// local dev. Returns a 7-char short SHA; commitsMatch handles full-vs-short.
 app.get('/api/version', (_req: Request, res: Response) => {
+  const envCommit =
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+    process.env.VERCEL_GIT_COMMIT_SHA ||
+    process.env.RENDER_GIT_COMMIT ||
+    process.env.COMMIT_SHA ||
+    process.env.SOURCE_COMMIT;
+  if (envCommit && envCommit.trim()) {
+    return void res.json({ commit: envCommit.trim().slice(0, 7) });
+  }
   const PROJECT_ROOT = path.join(__dirname, '..');
   const execOpts = { cwd: PROJECT_ROOT, shell: os.platform() === 'win32' ? 'cmd.exe' : undefined } as const;
   exec('git rev-parse --short HEAD', execOpts, (err, stdout) => {
