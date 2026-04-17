@@ -1592,9 +1592,22 @@ app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) =>
 
   const PROJECT_ROOT = path.join(__dirname, '..');
   const message = (req.body as { message?: string })?.message || 'Deploy from Schema Planner';
+  const execOpts = { cwd: PROJECT_ROOT } as const;
 
-  // Use cmd.exe on Windows so git credential manager works
-  const execOpts = { cwd: PROJECT_ROOT, shell: os.platform() === 'win32' ? 'cmd.exe' : undefined } as const;
+  // Read GitHub PAT for authenticated push (credential manager doesn't work in child_process)
+  const ghConfigPath = path.join(PROJECT_ROOT, '.github-config.json');
+  let pushCmd = 'git push origin main';
+  try {
+    const ghConfig = JSON.parse(fs.readFileSync(ghConfigPath, 'utf-8'));
+    if (ghConfig.pat) {
+      // Build authenticated push URL from remote origin
+      const remoteUrl = require('child_process').execSync('git remote get-url origin', { cwd: PROJECT_ROOT }).toString().trim();
+      const match = remoteUrl.match(/github\.com[/:](.+?)(?:\.git)?$/);
+      if (match) {
+        pushCmd = `git push https://${ghConfig.pat}@github.com/${match[1]}.git HEAD:main`;
+      }
+    }
+  } catch { /* no PAT, try default push */ }
 
   // First check if there are changes
   exec('git status --porcelain', execOpts, (statusErr, statusOut) => {
@@ -1606,10 +1619,9 @@ app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) =>
         if (logErr || !logOut.trim()) {
           return void res.json({ success: true, status: 'nothing', message: 'No changes to deploy' });
         }
-        // There are unpushed commits, push them
-        exec('git push origin main', execOpts, (pushErr, pushOut) => {
+        exec(pushCmd, execOpts, (pushErr) => {
           if (pushErr) return void res.status(500).json({ error: `git push failed: ${pushErr.message}` });
-          return void res.json({ success: true, status: 'pushed', message: `Pushed unpushed commits`, detail: pushOut.trim() });
+          return void res.json({ success: true, status: 'pushed', message: 'Pushed unpushed commits' });
         });
       });
       return;
@@ -1617,20 +1629,24 @@ app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) =>
 
     // There are changes — add, commit, push
     const commitMsg = `${message}\n\nCo-Authored-By: Schema Planner <noreply@schemaplanner.dev>`;
-    const escapedMsg = os.platform() === 'win32' ? commitMsg.replace(/"/g, '""') : commitMsg.replace(/"/g, '\\"');
-    const sep = os.platform() === 'win32' ? ' & ' : ' && ';
-    const cmd = `git add -A${sep}git commit -m "${escapedMsg}"${sep}git push origin main`;
-    exec(cmd, execOpts, (err, stdout, stderr) => {
-      if (err) return void res.status(500).json({ error: `Deploy failed: ${err.message}`, detail: stderr });
-      // Extract commit hash from output
-      const hashMatch = stdout.match(/\[main ([a-f0-9]+)\]/);
-      return void res.json({
-        success: true,
-        status: 'deployed',
-        message: `Committed and pushed`,
-        commitHash: hashMatch?.[1] || null,
-        filesChanged: statusOut.trim().split('\n').length,
-        detail: stdout.trim(),
+    exec('git add -A', execOpts, (addErr) => {
+      if (addErr) return void res.status(500).json({ error: `git add failed: ${addErr.message}` });
+      exec(`git commit -m "${commitMsg.replace(/"/g, '\\"')}"`, execOpts, (commitErr, commitOut) => {
+        if (commitErr) return void res.status(500).json({ error: `git commit failed: ${commitErr.message}` });
+        const hashMatch = commitOut.match(/\[main ([a-f0-9]+)\]/);
+        exec(pushCmd, execOpts, (pushErr) => {
+          if (pushErr) return void res.status(500).json({ error: `git push failed: ${pushErr.message}` });
+          // Update local remote tracking
+          exec('git fetch origin', execOpts, () => {
+            return void res.json({
+              success: true,
+              status: 'deployed',
+              message: 'Committed and pushed',
+              commitHash: hashMatch?.[1] || null,
+              filesChanged: statusOut.trim().split('\n').length,
+            });
+          });
+        });
       });
     });
   });
