@@ -344,6 +344,8 @@ app.delete('/api/schema-planner', (req: Request, res: Response) => {
   // Cascade-delete any rich notes attached to this entity
   db.prepare('DELETE FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ?')
     .run(meta.entityType, id);
+  db.prepare('DELETE FROM _splan_entity_dependencies WHERE entity_type = ? AND entity_id = ?')
+    .run(meta.entityType, id);
 
   if (tableName !== '_splan_grouping_presets' && tableName !== '_splan_view_presets' && tableName !== '_splan_change_log') {
     logChange({
@@ -446,6 +448,8 @@ app.delete('/api/column-defs/:id', (req: Request, res: Response) => {
         }).find(([k]) => k === def.entity_type)?.[1]
       ) ?? String(def.entity_type);
       db.prepare('DELETE FROM _splan_entity_notes WHERE entity_type = ? AND note_key = ?')
+        .run(entityType, def.column_key);
+      db.prepare('DELETE FROM _splan_entity_dependencies WHERE entity_type = ? AND note_key = ?')
         .run(entityType, def.column_key);
     } catch { /* ignore */ }
   }
@@ -571,6 +575,135 @@ app.delete('/api/schema-planner/notes', (req: Request, res: Response) => {
     db.prepare('DELETE FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ?')
       .run(entityType, entityId);
   }
+  return void res.json({ success: true });
+});
+
+// ─── Entity Dependencies (paired with entity notes) ─────────────────────────
+// Each note_key may have a set of dependency entries describing WHY the refs
+// inside the note are deps of this (entityType, entityId). Auto-populated by
+// note saves (next commit) and/or user/Claude edits.
+
+app.get('/api/schema-planner/dependencies', (req: Request, res: Response) => {
+  const entityType = req.query.entityType ? String(req.query.entityType) : null;
+  const entityIdRaw = req.query.entityId;
+  const noteKey = req.query.noteKey ? String(req.query.noteKey) : null;
+  const refType = req.query.refType ? String(req.query.refType) : null;
+  const refId = req.query.refId ? String(req.query.refId) : null;
+
+  const db = getDb();
+
+  // Reverse lookup: "who depends on this ref?"
+  if (refType && refId) {
+    const rows = db.prepare(
+      'SELECT * FROM _splan_entity_dependencies WHERE ref_type = ? AND ref_id = ?'
+    ).all(refType, refId) as Record<string, unknown>[];
+    return void res.json(rows.map(parseRow));
+  }
+
+  if (!entityType) return void res.status(400).json({ error: 'entityType or (refType,refId) required' });
+
+  // Batch by type only — for per-tab grid badge cache.
+  if (entityIdRaw === undefined || entityIdRaw === '') {
+    const rows = db.prepare(
+      'SELECT * FROM _splan_entity_dependencies WHERE entity_type = ?'
+    ).all(entityType) as Record<string, unknown>[];
+    return void res.json(rows.map(parseRow));
+  }
+
+  const entityId = Number(entityIdRaw);
+  if (!Number.isFinite(entityId) || entityId <= 0) {
+    return void res.status(400).json({ error: 'entityId must be a positive number' });
+  }
+
+  if (noteKey) {
+    const rows = db.prepare(
+      'SELECT * FROM _splan_entity_dependencies WHERE entity_type = ? AND entity_id = ? AND note_key = ?'
+    ).all(entityType, entityId, noteKey) as Record<string, unknown>[];
+    return void res.json(rows.map(parseRow));
+  }
+
+  const rows = db.prepare(
+    'SELECT * FROM _splan_entity_dependencies WHERE entity_type = ? AND entity_id = ?'
+  ).all(entityType, entityId) as Record<string, unknown>[];
+  return void res.json(rows.map(parseRow));
+});
+
+app.post('/api/schema-planner/dependencies', (req: Request, res: Response) => {
+  const { entityType, entityId, noteKey, refType, refId, refName, explanation } = req.body as {
+    entityType: string;
+    entityId: number;
+    noteKey: string;
+    refType: string;
+    refId: string | number;
+    refName?: string | null;
+    explanation?: string;
+  };
+  if (!entityType) return void res.status(400).json({ error: 'entityType required' });
+  if (!Number.isFinite(entityId) || entityId <= 0) return void res.status(400).json({ error: 'entityId must be a positive number' });
+  if (!noteKey) return void res.status(400).json({ error: 'noteKey required' });
+  if (!refType) return void res.status(400).json({ error: 'refType required' });
+  if (refId === undefined || refId === null || String(refId) === '') return void res.status(400).json({ error: 'refId required' });
+
+  const db = getDb();
+  const refIdStr = String(refId);
+  const existing = db.prepare(
+    'SELECT id FROM _splan_entity_dependencies WHERE entity_type = ? AND entity_id = ? AND note_key = ? AND ref_type = ? AND ref_id = ?'
+  ).get(entityType, entityId, noteKey, refType, refIdStr) as { id: number } | undefined;
+  if (existing) return void res.status(409).json({ error: 'Dependency already exists', id: existing.id });
+
+  // Manual deps (auto_added=0) by default when created via this endpoint — auto-extract uses
+  // the internal sync helper (next commit) with auto_added=1.
+  const info = db.prepare(
+    `INSERT INTO _splan_entity_dependencies
+       (entity_type, entity_id, note_key, ref_type, ref_id, ref_name, explanation, auto_added)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0)`
+  ).run(entityType, entityId, noteKey, refType, refIdStr, refName ?? null, explanation ?? '');
+
+  const created = db.prepare('SELECT * FROM _splan_entity_dependencies WHERE id = ?').get(info.lastInsertRowid) as Record<string, unknown>;
+  return void res.status(201).json(parseRow(created));
+});
+
+app.put('/api/schema-planner/dependencies/:id', (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return void res.status(400).json({ error: 'Invalid id' });
+  const { explanation, isStale, autoAdded } = req.body as {
+    explanation?: string;
+    isStale?: boolean;
+    autoAdded?: boolean;
+  };
+
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM _splan_entity_dependencies WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  if (!existing) return void res.status(404).json({ error: 'Not found' });
+
+  const updatedAt = new Date().toISOString().replace('T', ' ').substring(0, 19);
+  const explanationChanged = explanation !== undefined && String(explanation) !== String(existing.explanation ?? '');
+  const nextExplanation = explanation !== undefined ? explanation : (existing.explanation as string);
+  const nextIsStale = isStale !== undefined ? (isStale ? 1 : 0) : (existing.is_stale as number);
+  const nextAutoAdded = autoAdded !== undefined ? (autoAdded ? 1 : 0) : (existing.auto_added as number);
+  const nextIsUserEdited = explanationChanged ? 1 : (existing.is_user_edited as number);
+  // Per D6: when the user edits explanation, snapshot it in previous_user_edit so
+  // the next Claude analyze pass can reconcile with the user's intent.
+  const nextPreviousUserEdit = explanationChanged
+    ? String(explanation)
+    : (existing.previous_user_edit as string | null);
+
+  db.prepare(
+    `UPDATE _splan_entity_dependencies
+       SET explanation = ?, is_stale = ?, is_user_edited = ?, auto_added = ?, previous_user_edit = ?, updated_at = ?
+     WHERE id = ?`
+  ).run(nextExplanation, nextIsStale, nextIsUserEdited, nextAutoAdded, nextPreviousUserEdit, updatedAt, id);
+
+  const fresh = db.prepare('SELECT * FROM _splan_entity_dependencies WHERE id = ?').get(id) as Record<string, unknown>;
+  return void res.json(parseRow(fresh));
+});
+
+app.delete('/api/schema-planner/dependencies/:id', (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return void res.status(400).json({ error: 'Invalid id' });
+  const db = getDb();
+  const info = db.prepare('DELETE FROM _splan_entity_dependencies WHERE id = ?').run(id);
+  if (info.changes === 0) return void res.status(404).json({ error: 'Not found' });
   return void res.json({ success: true });
 });
 

@@ -431,6 +431,29 @@ function initSchema(db: Database.Database) {
       UNIQUE(entity_type, entity_id, note_key)
     );
 
+    CREATE TABLE IF NOT EXISTS _splan_entity_dependencies (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type          TEXT NOT NULL,
+      entity_id            INTEGER NOT NULL,
+      note_key             TEXT NOT NULL,
+      ref_type             TEXT NOT NULL,
+      ref_id               TEXT NOT NULL,
+      ref_name             TEXT,
+      explanation          TEXT NOT NULL DEFAULT '',
+      previous_user_edit   TEXT,
+      is_stale             INTEGER NOT NULL DEFAULT 0,
+      is_user_edited       INTEGER NOT NULL DEFAULT 0,
+      auto_added           INTEGER NOT NULL DEFAULT 1,
+      last_analyzed_at     TEXT,
+      created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(entity_type, entity_id, note_key, ref_type, ref_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_entity_deps_by_entity
+      ON _splan_entity_dependencies(entity_type, entity_id, note_key);
+    CREATE INDEX IF NOT EXISTS idx_entity_deps_by_ref
+      ON _splan_entity_dependencies(ref_type, ref_id);
+
     CREATE TABLE IF NOT EXISTS _splan_scheduled_runs (
       id                     INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id                 TEXT NOT NULL UNIQUE,
@@ -471,6 +494,7 @@ function initSchema(db: Database.Database) {
   migrate('_splan_code_changes', 'linked_tables', "TEXT NOT NULL DEFAULT '[]'");
   migrate('_splan_code_changes', 'linked_fields', "TEXT NOT NULL DEFAULT '[]'");
   migrate('_splan_column_defs', 'formula', "TEXT NOT NULL DEFAULT ''");
+  migrate('_splan_entity_notes', 'last_analyzed_at', "TEXT");
 
   // ─── F2: Extend _splan_sync_meta to record attempts (success + failure) ───
   migrate('_splan_sync_meta', 'success', "INTEGER NOT NULL DEFAULT 1");

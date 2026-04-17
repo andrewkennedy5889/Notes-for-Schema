@@ -71,6 +71,9 @@ export const BOOL_COLUMNS = new Set([
   'font_bold',
   'font_underline',
   'wrap',
+  'is_stale',
+  'is_user_edited',
+  'auto_added',
 ]);
 
 // ─── Parse a row coming OUT of SQLite ────────────────────────────────────────
