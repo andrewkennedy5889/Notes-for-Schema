@@ -237,6 +237,13 @@ export default function SchemaPlanner() {
   });
   useEffect(() => { localStorage.setItem('splan_tabTitleNotifications', String(tabTitleNotifications)); }, [tabTitleNotifications]);
 
+  // Phase 7: departure gate — block close when remote is out of sync
+  const [enforceSyncBeforeClose, setEnforceSyncBeforeClose] = useState<boolean>(() => {
+    const raw = localStorage.getItem('splan_enforceSyncBeforeClose');
+    return raw === null ? true : raw === 'true';
+  });
+  useEffect(() => { localStorage.setItem('splan_enforceSyncBeforeClose', String(enforceSyncBeforeClose)); }, [enforceSyncBeforeClose]);
+
   // F7: remote version badge
   const [versionState, setVersionState] = useState<{
     local: string | null; remote: string | null; match: boolean; checkedAt: string;
@@ -250,6 +257,9 @@ export default function SchemaPlanner() {
   const hasAutoSyncedOnMount = useRef<boolean>(false);
   const originalTitleRef = useRef<string>(typeof document !== 'undefined' ? document.title : '');
   const deployTitleStateRef = useRef<'idle' | 'progress' | 'success' | 'fail'>('idle');
+  const syncStatusRef = useRef<SyncStatus | null>(null);
+  const enforceSyncRef = useRef<boolean>(true);
+  const autoSyncRef = useRef<boolean>(true);
 
   // App mode (local vs hosted) — gates dev-only UI surfaces
   const [appMode, setAppMode] = useState<AppMode>('local');
@@ -636,6 +646,42 @@ export default function SchemaPlanner() {
       restoreTitle();
     };
   }, [restoreTitle, setDeployTitle]);
+
+  // Phase 7: departure gate — block tab close when remote is out of sync.
+  // We mirror the latest sync snapshot into a ref so the beforeunload handler
+  // (which cannot observe React state updates during unload) sees current values.
+  useEffect(() => { syncStatusRef.current = syncStatus; }, [syncStatus]);
+  useEffect(() => { enforceSyncRef.current = enforceSyncBeforeClose; }, [enforceSyncBeforeClose]);
+  useEffect(() => { autoSyncRef.current = autoSyncEnabled; }, [autoSyncEnabled]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!enforceSyncRef.current) return;
+      const s = syncStatusRef.current;
+      if (!s || !s.configured) return;
+      const localCount = s.local?.changeCount ?? 0;
+      const remoteCount = s.remote?.changeCount ?? 0;
+      const schemaMismatch = s.schema ? !s.schema.match : false;
+
+      if (remoteCount > 0 && localCount === 0 && !schemaMismatch && autoSyncRef.current) {
+        // Remote-ahead-only with matching schema: fire-and-forget silent pull
+        // so overnight scheduled-agent output isn't blocked behind a prompt.
+        void fetch('/api/sync/pull?source=auto-pull-on-close', { method: 'POST', keepalive: true });
+        return;
+      }
+      if (schemaMismatch || localCount > 0) {
+        const msg = schemaMismatch
+          ? 'Remote schema is out of date. Scheduled agents may skip until you deploy. Close anyway?'
+          : `${localCount} local change(s) not pushed. Close anyway?`;
+        e.preventDefault();
+        e.returnValue = msg;
+        return msg;
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
 
   // Load PAT status from server on mount
   useEffect(() => {
@@ -1399,6 +1445,22 @@ export default function SchemaPlanner() {
                   Notify in tab title during deploys
                   <span className="block" style={{ fontSize: 10, color: "var(--color-text-subtle)", marginTop: 2 }}>
                     Changes this browser tab&rsquo;s title when a deploy starts or finishes so you can spot it from another tab.
+                  </span>
+                </span>
+              </label>
+
+              {/* Phase 7: Departure gate */}
+              <label className="flex items-start gap-2 mb-4 cursor-pointer" style={{ color: "var(--color-text)" }}>
+                <input
+                  type="checkbox"
+                  checked={enforceSyncBeforeClose}
+                  onChange={(e) => setEnforceSyncBeforeClose(e.target.checked)}
+                  style={{ marginTop: 2 }}
+                />
+                <span style={{ fontSize: 12 }}>
+                  Warn before closing when remote is out of sync
+                  <span className="block" style={{ fontSize: 10, color: "var(--color-text-subtle)", marginTop: 2 }}>
+                    Blocks tab close if schema differs or local changes aren&rsquo;t pushed — prevents overnight scheduled runs from skipping on stale remote schema.
                   </span>
                 </span>
               </label>
