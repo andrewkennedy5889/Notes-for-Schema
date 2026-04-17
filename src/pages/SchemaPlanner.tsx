@@ -4,7 +4,7 @@ import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import AgentsTab from "../components/schema-planner/AgentsTab";
 import NotebookTab from "../components/schema-planner/NotebookTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
-import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, fetchLastDeploy, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt, type LastDeploy } from "../lib/api";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, fetchLastDeploy, fetchLocalGitStatus, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt, type LastDeploy, type LocalGitStatus } from "../lib/api";
 import SyncDiffViewer from "../components/schema-planner/SyncDiffViewer";
 import AutoSyncToast from "../components/schema-planner/AutoSyncToast";
 
@@ -147,109 +147,20 @@ function useRefAppearance(): [Record<string, string>, (c: Record<string, string>
   return [colors, saveColors, icons, saveIcons];
 }
 
-// F1.4: tolerant commit-hash comparison (case, whitespace, full-vs-short)
-function commitsMatch(a: string | null, b: string | null): boolean {
-  if (!a || !b) return false;
-  const na = a.trim().toLowerCase();
-  const nb = b.trim().toLowerCase();
-  if (!na || !nb) return false;
-  if (na === nb) return true;
-  return na.startsWith(nb) || nb.startsWith(na);
-}
-
-// F4 helpers
-function formatRelative(iso: string): string {
-  const ts = Date.parse(iso.includes('Z') || /[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
-  if (Number.isNaN(ts)) return iso;
-  const diff = Date.now() - ts;
-  const sec = Math.round(diff / 1000);
-  if (sec < 5) return 'just now';
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min} minute${min === 1 ? '' : 's'} ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`;
-  const day = Math.round(hr / 24);
-  return `${day} day${day === 1 ? '' : 's'} ago`;
-}
-
-function formatLocalTime(iso: string): string {
-  const ts = Date.parse(iso.includes('Z') || /[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
-  if (Number.isNaN(ts)) return iso;
-  return new Date(ts).toLocaleTimeString();
-}
-
-function humanizeSource(src: string): string {
-  return src
-    .split('-')
-    .map(w => w ? w[0].toUpperCase() + w.slice(1) : w)
-    .join(' ');
-}
-
-// F5: localStorage helpers for dismissed-attempt IDs
-const DISMISSED_KEY = 'splan_dismissedAttempts';
-const DISMISSED_MAX = 50;
-
-function readDismissed(): string[] {
-  try {
-    const raw = localStorage.getItem(DISMISSED_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) throw new Error('not an array');
-    return arr.filter(x => typeof x === 'string');
-  } catch {
-    try { localStorage.setItem(DISMISSED_KEY, '[]'); } catch { /* ignore */ }
-    return [];
-  }
-}
-
-function writeDismissed(list: string[]): void {
-  try {
-    const trimmed = list.slice(-DISMISSED_MAX);
-    localStorage.setItem(DISMISSED_KEY, JSON.stringify(trimmed));
-  } catch { /* storage full — banner just won't stay dismissed across reloads */ }
-}
-
-// F8: pending-deploy persistence
-interface PendingDeploy {
-  targetCommit: string;
-  startTime: number;
-  filesChanged: number;
-  remoteUrl?: string;
-}
-
-const PENDING_DEPLOY_KEY = 'splan_pendingDeploy';
-const PENDING_DEPLOY_MAX_AGE_MS = 30 * 60 * 1000;
-
-function readPendingDeploy(): PendingDeploy | null {
-  try {
-    const raw = localStorage.getItem(PENDING_DEPLOY_KEY);
-    if (!raw) return null;
-    const obj = JSON.parse(raw);
-    if (obj && typeof obj.targetCommit === 'string' && typeof obj.startTime === 'number') return obj;
-    return null;
-  } catch { return null; }
-}
-
-function writePendingDeploy(p: PendingDeploy): void {
-  try { localStorage.setItem(PENDING_DEPLOY_KEY, JSON.stringify(p)); } catch { /* ignore */ }
-}
-
-function clearPendingDeploy(): void {
-  try { localStorage.removeItem(PENDING_DEPLOY_KEY); } catch { /* ignore */ }
-}
-
-// F6: shouldAutoSync logic
-function shouldAutoSync(status: SyncStatus | null, autoSyncEnabled: boolean): 'push' | 'pull' | null {
-  if (!autoSyncEnabled) return null;
-  if (!status || !status.configured) return null;
-  if (status.schema && !status.schema.match) return null;
-  const local = status.local?.changeCount ?? 0;
-  const remote = status.remote?.changeCount ?? 0;
-  if (local > 0 && remote === 0) return 'push';
-  if (remote > 0 && local === 0) return 'pull';
-  return null;
-}
+import {
+  commitsMatch,
+  formatRelative,
+  formatLocalTime,
+  humanizeSource,
+  readDismissed,
+  writeDismissed,
+  DISMISSED_MAX,
+  readPendingDeploy,
+  writePendingDeploy,
+  clearPendingDeploy,
+  PENDING_DEPLOY_MAX_AGE_MS,
+  shouldAutoSync,
+} from "../lib/sync-helpers";
 
 function useDepthColors(): [string[], (colors: string[]) => void] {
   const [colors, setColors] = useState<string[]>(() => {
@@ -291,6 +202,9 @@ export default function SchemaPlanner() {
   // Last deploy (success / timeout / failed) + repo URL for GitHub linking
   const [lastDeploy, setLastDeploy] = useState<LastDeploy | null>(null);
   const [repoUrl, setRepoUrl] = useState<string | null>(null);
+
+  // Local git: unpushed commits + working-tree dirty flag
+  const [localGit, setLocalGit] = useState<LocalGitStatus | null>(null);
 
   // F5: dismissed attempt IDs
   const [dismissedAttempts, setDismissedAttempts] = useState<string[]>(() => readDismissed());
@@ -355,12 +269,17 @@ export default function SchemaPlanner() {
     fetchLastDeploy().then(r => { setLastDeploy(r.deploy); setRepoUrl(r.repoUrl); }).catch(() => {});
   }, []);
 
-  // Poll last-deploy every 60s (changes less often than last-attempt)
+  const refreshLocalGit = useCallback(() => {
+    fetchLocalGitStatus().then(setLocalGit).catch(() => {});
+  }, []);
+
+  // Poll last-deploy + local-git every 60s (change less often than sync status)
   useEffect(() => {
     refreshLastDeploy();
-    const interval = setInterval(refreshLastDeploy, 60000);
+    refreshLocalGit();
+    const interval = setInterval(() => { refreshLastDeploy(); refreshLocalGit(); }, 60000);
     return () => clearInterval(interval);
-  }, [refreshLastDeploy]);
+  }, [refreshLastDeploy, refreshLocalGit]);
 
   type SyncOpts = { force?: boolean; source?: string; followUpCount?: number };
 
@@ -506,9 +425,10 @@ export default function SchemaPlanner() {
     if (fresh) setSyncStatus(fresh);
     refreshLastAttempt();
     refreshLastDeploy();
+    refreshLocalGit();
     refreshVersionState();
     hasAutoSyncedOnMount.current = false;
-  }, [refreshLastAttempt, refreshLastDeploy, refreshVersionState]);
+  }, [refreshLastAttempt, refreshLastDeploy, refreshLocalGit, refreshVersionState]);
 
   // F8/F1: shared poll-loop runner, callable from initial deploy AND from resume
   const startDeployPolling = useCallback((targetCommit: string, startTime: number, remoteUrl: string) => {
@@ -1556,6 +1476,29 @@ export default function SchemaPlanner() {
                   {syncStatus.error && (
                     <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(224,85,85,0.1)", border: "1px solid rgba(224,85,85,0.3)", color: "#e05555" }}>
                       {syncStatus.error}
+                    </div>
+                  )}
+
+                  {/* Commits ahead of origin indicator (local-only) */}
+                  {!isHosted && localGit && (localGit.commitsAhead > 0 || localGit.dirty) && (
+                    <div
+                      className="text-xs p-2 rounded mb-3"
+                      style={{
+                        backgroundColor: "rgba(242,182,97,0.1)",
+                        border: "1px solid rgba(242,182,97,0.3)",
+                        color: "#f2b661",
+                      }}
+                    >
+                      {localGit.commitsAhead > 0 && (
+                        <div>
+                          📝 {localGit.commitsAhead} commit{localGit.commitsAhead === 1 ? '' : 's'} ahead of origin — will push on next Deploy.
+                        </div>
+                      )}
+                      {localGit.dirty && (
+                        <div style={{ marginTop: localGit.commitsAhead > 0 ? 4 : 0 }}>
+                          ✏️ Uncommitted working-tree changes — Deploy will commit and push them.
+                        </div>
+                      )}
                     </div>
                   )}
 
