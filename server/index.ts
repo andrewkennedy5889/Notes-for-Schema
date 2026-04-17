@@ -1538,6 +1538,7 @@ app.post('/api/agents/schedules', async (req: Request, res: Response) => {
     // Persist the schedule config
     ensureSplanDir();
     const schedules = readJson<Record<string, unknown>>(AGENT_SCHEDULES_FILE, {});
+    const nowIso = new Date().toISOString();
     schedules[agentId] = {
       cronExpression: config.cronExpression,
       cronLabel: config.cronLabel,
@@ -1545,13 +1546,29 @@ app.post('/api/agents/schedules', async (req: Request, res: Response) => {
       paramDefaults: config.paramDefaults,
       triggerId,
       enabled: true,
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso,
       cliOutput: stdout.trim(),
+      expectedSchemaFingerprint: computeSchemaFingerprint(),
+      pinnedAt: nowIso,
     };
     fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
 
     return void res.json({ saved: true, triggerId });
   });
+});
+
+// POST /api/agents/schedules/:agentId/repin — recompute expected schema fingerprint
+app.post('/api/agents/schedules/:agentId/repin', requireLocal, (req: Request, res: Response) => {
+  const { agentId } = req.params;
+  ensureSplanDir();
+  const schedules = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
+  const existing = schedules[agentId];
+  if (!existing) return void res.status(404).json({ error: 'schedule_not_found' });
+  const pinnedAt = new Date().toISOString();
+  const expectedSchemaFingerprint = computeSchemaFingerprint();
+  schedules[agentId] = { ...existing, expectedSchemaFingerprint, pinnedAt };
+  fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+  return void res.json({ repinned: true, expectedSchemaFingerprint, pinnedAt });
 });
 
 // DELETE /api/agents/schedules/:agentId — remove a schedule
@@ -2420,6 +2437,10 @@ function getSchemaTables(): string[] {
   return (db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_splan_%' ORDER BY name"
   ).all() as Array<{ name: string }>).map(t => t.name);
+}
+
+function computeSchemaFingerprint(): string {
+  return crypto.createHash('sha256').update(getSchemaTables().join('\n')).digest('hex');
 }
 
 // ─── GET /api/sync-status — changes since last sync ─────────────────────────
