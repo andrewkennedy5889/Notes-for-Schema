@@ -50,7 +50,7 @@ import PrototypesGrid from "./PrototypesGrid";
 import ProjectsGrid from "./ProjectsGrid";
 import DependedOnBySection from "./DependedOnBySection";
 import { FullscreenNoteWrapper } from "./FullscreenNoteWrapper";
-import { fetchColumnDefs, createColumnDef, deleteColumnDef, type ColumnDef, fetchDisplayTemplates, fetchColumnTemplateAssignments, seedDisplayTemplates, createDisplayTemplate, updateDisplayTemplate, deleteDisplayTemplate, assignColumnTemplate, removeColumnTemplateAssignment, type DisplayTemplate, type ColumnTemplateAssignment, fetchEntityNotesByType, saveEntityNote, type EntityNote, fetchDependenciesByType, fetchDependencies, updateDependency, deleteDependency, type DependencyEntry } from "@/lib/api";
+import { fetchColumnDefs, createColumnDef, deleteColumnDef, type ColumnDef, fetchDisplayTemplates, fetchColumnTemplateAssignments, seedDisplayTemplates, createDisplayTemplate, updateDisplayTemplate, deleteDisplayTemplate, assignColumnTemplate, removeColumnTemplateAssignment, type DisplayTemplate, type ColumnTemplateAssignment, fetchEntityNotesByType, saveEntityNote, type EntityNote, fetchDependenciesByType, fetchDependencies, updateDependency, deleteDependency, analyzeDependencies, type DependencyEntry } from "@/lib/api";
 import { evaluateFormula } from "@/lib/formula-eval";
 
 /** Draggable table row grip handle */
@@ -648,12 +648,20 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
   // Dependencies side panel — opened when clicking a dependencies cell.
   // depColKey is the grid column key (still has `_deps` suffix); resolve to notesKey via noteKeyFromDepCol.
   const [depPanel, setDepPanel] = useState<{ row: Record<string, unknown>; tabKey: string; depColKey: string } | null>(null);
+  const [analyzingKey, setAnalyzingKey] = useState<string | null>(null);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [analyzeToast, setAnalyzeToast] = useState<string | null>(null);
   useEffect(() => {
     if (!depPanel) return;
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") setDepPanel(null); };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [depPanel]);
+  useEffect(() => {
+    if (!analyzeToast) return;
+    const t = setTimeout(() => setAnalyzeToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [analyzeToast]);
 
   // Refresh deps for a single entity. Used after a notes save to pick up any auto-extracted
   // insertions/stale-markings the server just performed.
@@ -7731,12 +7739,40 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
                   <div className="text-xs truncate" style={{ color: "var(--color-text-muted)" }}>{headerLabel}</div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    disabled
-                    className="text-xs px-2 py-1 rounded border cursor-not-allowed"
-                    style={{ color: "var(--color-text-muted)", borderColor: "var(--color-divider)", opacity: 0.5 }}
-                    title="Available in next release"
-                  >Analyze Now</button>
+                  {(() => {
+                    const key = `${entityType}:${eid}:${notesKey}`;
+                    const busy = analyzingKey === key;
+                    const canAnalyze = eid > 0 && deps.some((d) => !d.isStale);
+                    const runAnalyze = async () => {
+                      setAnalyzingKey(key);
+                      setAnalyzeError(null);
+                      const t0 = performance.now();
+                      try {
+                        const { analyzed, dependencies } = await analyzeDependencies(entityType, eid, notesKey);
+                        setDependenciesCache((prev) => ({ ...prev, [key]: dependencies }));
+                        const secs = Math.max(1, Math.round((performance.now() - t0) / 1000));
+                        setAnalyzeToast(`Analyzed ${analyzed} dependenc${analyzed === 1 ? "y" : "ies"} in ${secs}s`);
+                      } catch (err) {
+                        setAnalyzeError((err as Error).message || "Analyze failed");
+                      } finally {
+                        setAnalyzingKey(null);
+                      }
+                    };
+                    return (
+                      <button
+                        onClick={runAnalyze}
+                        disabled={busy || !canAnalyze}
+                        className="text-xs px-2 py-1 rounded border transition-colors"
+                        style={{
+                          color: canAnalyze && !busy ? "#a78bfa" : "var(--color-text-muted)",
+                          borderColor: canAnalyze && !busy ? "rgba(167,139,250,0.4)" : "var(--color-divider)",
+                          opacity: busy || !canAnalyze ? 0.6 : 1,
+                          cursor: busy || !canAnalyze ? "not-allowed" : "pointer",
+                        }}
+                        title={canAnalyze ? "Send note + refs to Claude CLI for explanation" : "No refs to analyze"}
+                      >{busy ? "Analyzing…" : "Analyze Now"}</button>
+                    );
+                  })()}
                   <button
                     onClick={() => setDepPanel(null)}
                     className="w-7 h-7 rounded flex items-center justify-center text-sm hover:bg-white/10 transition-colors"
@@ -7745,6 +7781,22 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
                   >✕</button>
                 </div>
               </div>
+              {analyzeError && (
+                <div
+                  className="px-4 py-2 text-xs border-b"
+                  style={{ color: "#e05555", background: "rgba(224,85,85,0.08)", borderColor: "rgba(224,85,85,0.3)" }}
+                >
+                  {analyzeError}
+                </div>
+              )}
+              {analyzeToast && (
+                <div
+                  className="px-4 py-2 text-xs border-b"
+                  style={{ color: "#4ecb71", background: "rgba(78,203,113,0.08)", borderColor: "rgba(78,203,113,0.3)" }}
+                >
+                  {analyzeToast}
+                </div>
+              )}
               <div className="flex-1 overflow-y-auto px-4 py-3">
                 {deps.length === 0 ? (
                   <div className="text-xs italic" style={{ color: "var(--color-text-muted)" }}>

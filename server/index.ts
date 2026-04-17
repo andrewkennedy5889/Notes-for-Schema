@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { exec, execSync } from 'child_process';
+import { exec, execSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb } from './db.js';
@@ -854,6 +854,192 @@ app.delete('/api/schema-planner/dependencies/:id', (req: Request, res: Response)
   const info = db.prepare('DELETE FROM _splan_entity_dependencies WHERE id = ?').run(id);
   if (info.changes === 0) return void res.status(404).json({ error: 'Not found' });
   return void res.json({ success: true });
+});
+
+// ─── Dependencies analyze (Claude CLI, on-demand) ───────────────────────────
+// Reads the note + its current deps, builds a prompt, runs `claude -p` headlessly,
+// parses the returned JSON, and writes explanations into each matching dep row.
+// Local-only — the hosted app has no Claude CLI access.
+
+const DEFAULT_DEP_ANALYZER_PROMPT = `You are analyzing dependencies for {entityType} "{entityName}" in a database schema planning tool.
+
+This entity has notes stored below. The notes mention several references to other entities (tables, fields, modules, features, concepts, research items). Your job is to write a short (max 20 words) explanation for each reference, saying WHY this {entityType} depends on that reference, based ONLY on the note context.
+
+NOTE CONTENT:
+{noteContent}
+
+REFERENCES FOUND:
+{refList}
+{userEditsContextBlock}
+Respond with JSON only, no prose:
+{"dependencies": [{"refType": "...", "refId": "...", "refName": "...", "explanation": "..."}]}
+
+Rules:
+- One entry per reference in REFERENCES FOUND.
+- Explanation must be <= 20 words, specific, grounded in the note content.
+- If the note context doesn't clarify why the dep exists, write "Referenced in notes; dependency reason unclear."
+- Do not invent refs that aren't in REFERENCES FOUND.`;
+
+function buildDepAnalyzerPrompt(params: {
+  entityType: string;
+  entityName: string;
+  noteContent: string;
+  deps: Array<Record<string, unknown>>;
+}): string {
+  const cfg = readJson<Record<string, unknown>>(AGENT_CONFIG_FILE, {});
+  const template = typeof cfg['dependencyAnalyzer.prompt'] === 'string'
+    ? String(cfg['dependencyAnalyzer.prompt'])
+    : DEFAULT_DEP_ANALYZER_PROMPT;
+
+  const nonStale = params.deps.filter((d) => d.is_stale !== 1);
+  const refList = nonStale
+    .map((d) => `- refType=${d.ref_type}, refId=${d.ref_id}${d.ref_name ? `, refName="${d.ref_name}"` : ''}`)
+    .join('\n') || '(none)';
+
+  const userEdits = nonStale.filter((d) => d.previous_user_edit);
+  const userEditsContextBlock = userEdits.length > 0
+    ? `\nUSER-EDITED EXPLANATIONS (reconcile with these where applicable):\n${
+        userEdits.map((d) => `- refType=${d.ref_type}, refName="${d.ref_name ?? d.ref_id}": "${d.previous_user_edit}"`).join('\n')
+      }\n`
+    : '';
+
+  return template
+    .replaceAll('{entityType}', params.entityType)
+    .replaceAll('{entityName}', params.entityName)
+    .replaceAll('{noteContent}', params.noteContent || '(empty)')
+    .replaceAll('{refList}', refList)
+    .replaceAll('{userEditsContextBlock}', userEditsContextBlock);
+}
+
+function runClaudeHeadless(prompt: string, timeoutMs = 180_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    // Windows needs shell:true so `claude` resolves via PATH (.cmd shim).
+    const proc = spawn('claude', ['-p'], { cwd: PROJECT_DIR, shell: process.platform === 'win32' });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => { proc.kill(); reject(new Error('claude CLI timed out')); }, timeoutMs);
+    proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf-8'); });
+    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf-8'); });
+    proc.on('error', (err: Error) => { clearTimeout(timer); reject(err); });
+    proc.on('close', (code: number) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`claude CLI exited ${code}: ${stderr.slice(0, 300)}`));
+      resolve(stdout);
+    });
+    proc.stdin.write(prompt);
+    proc.stdin.end();
+  });
+}
+
+/** Pull the first JSON object out of a blob of text. Claude sometimes wraps
+ *  output in ``` fences or prefaces with prose even when told not to. */
+function extractJsonObject(blob: string): unknown {
+  // Strip markdown code fences if present
+  const fenceMatch = blob.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = fenceMatch ? fenceMatch[1] : blob;
+  const firstBrace = candidate.indexOf('{');
+  const lastBrace = candidate.lastIndexOf('}');
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    throw new Error('No JSON object found in Claude output');
+  }
+  const slice = candidate.slice(firstBrace, lastBrace + 1);
+  return JSON.parse(slice);
+}
+
+app.post('/api/schema-planner/dependencies/analyze', requireLocal, async (req: Request, res: Response) => {
+  const { entityType, entityId, noteKey } = req.body as {
+    entityType: string;
+    entityId: number;
+    noteKey: string;
+  };
+  if (!entityType) return void res.status(400).json({ error: 'entityType required' });
+  if (!Number.isFinite(entityId) || entityId <= 0) return void res.status(400).json({ error: 'entityId must be a positive number' });
+  if (!noteKey) return void res.status(400).json({ error: 'noteKey required' });
+
+  const db = getDb();
+  const note = db.prepare(
+    'SELECT content FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ? AND note_key = ?'
+  ).get(entityType, entityId, noteKey) as { content: string | null } | undefined;
+  const noteContent = note?.content ?? '';
+
+  const deps = db.prepare(
+    'SELECT * FROM _splan_entity_dependencies WHERE entity_type = ? AND entity_id = ? AND note_key = ?'
+  ).all(entityType, entityId, noteKey) as Array<Record<string, unknown>>;
+  if (deps.length === 0) return void res.json({ analyzed: 0, dependencies: [] });
+
+  // Resolve the entity's display name for the prompt header.
+  let entityName = String(entityId);
+  try {
+    const table = ({
+      module: '_splan_modules:module_id:module_name',
+      feature: '_splan_features:feature_id:feature_name',
+      concept: '_splan_concepts:concept_id:concept_name',
+      table: '_splan_data_tables:table_id:table_name',
+      field: '_splan_data_fields:field_id:field_name',
+      research: '_splan_research:research_id:title',
+    } as Record<string, string>)[entityType];
+    if (table) {
+      const [t, idCol, nameCol] = table.split(':');
+      const row = db.prepare(`SELECT ${nameCol} AS name FROM ${t} WHERE ${idCol} = ?`).get(entityId) as { name: string } | undefined;
+      if (row?.name) entityName = row.name;
+    }
+  } catch { /* fall back to id */ }
+
+  const prompt = buildDepAnalyzerPrompt({ entityType, entityName, noteContent, deps });
+
+  let raw: string;
+  try {
+    raw = await runClaudeHeadless(prompt);
+  } catch (e) {
+    return void res.status(502).json({ error: `Claude CLI failed: ${(e as Error).message}` });
+  }
+
+  let parsed: { dependencies?: Array<{ refType: string; refId: string; refName?: string | null; explanation?: string }> };
+  try {
+    parsed = extractJsonObject(raw) as typeof parsed;
+  } catch (e) {
+    return void res.status(502).json({ error: `Claude returned invalid JSON: ${(e as Error).message}`, raw: raw.slice(0, 500) });
+  }
+
+  const results = Array.isArray(parsed?.dependencies) ? parsed.dependencies : [];
+  if (results.length === 0) return void res.json({ analyzed: 0, dependencies: [] });
+
+  // Build a fast lookup so responses that shuffle order still land on the right row.
+  const byRef = new Map<string, Record<string, unknown>>();
+  for (const d of deps) byRef.set(`${d.ref_type}:${d.ref_id}`, d);
+
+  const updatedAt = new Date().toISOString().replace('T', ' ').substring(0, 19);
+  const updateStmt = db.prepare(
+    `UPDATE _splan_entity_dependencies
+       SET explanation = ?, previous_user_edit = NULL, is_user_edited = 0, last_analyzed_at = ?, updated_at = ?
+     WHERE id = ?`
+  );
+  let analyzed = 0;
+  const txn = db.transaction(() => {
+    for (const r of results) {
+      const row = byRef.get(`${r.refType}:${String(r.refId)}`);
+      if (!row) continue;
+      if (row.is_stale === 1) continue; // don't bother annotating stale rows
+      const explanation = typeof r.explanation === 'string' ? r.explanation : '';
+      updateStmt.run(explanation, updatedAt, updatedAt, row.id);
+      analyzed++;
+    }
+  });
+  txn();
+
+  logChange({
+    entityType,
+    entityId,
+    action: 'UPDATE',
+    fieldChanged: `${noteKey}_deps`,
+    newValue: `${analyzed} analyzed`,
+    reasoning: 'claude-analyze',
+  });
+
+  const fresh = db.prepare(
+    'SELECT * FROM _splan_entity_dependencies WHERE entity_type = ? AND entity_id = ? AND note_key = ?'
+  ).all(entityType, entityId, noteKey) as Array<Record<string, unknown>>;
+  return void res.json({ analyzed, dependencies: fresh.map(parseRow) });
 });
 
 // ─── Display Templates CRUD ─────────────────────────────────────────────────

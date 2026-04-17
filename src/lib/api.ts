@@ -470,6 +470,23 @@ export async function deleteDependency(id: number): Promise<{ success: boolean }
   return res.json();
 }
 
+export async function analyzeDependencies(
+  entityType: string,
+  entityId: number,
+  noteKey: string
+): Promise<{ analyzed: number; dependencies: DependencyEntry[] }> {
+  const res = await fetch(`${BASE}/schema-planner/dependencies/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entityType, entityId, noteKey }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `analyzeDependencies failed: ${res.statusText}`);
+  }
+  return res.json();
+}
+
 // ─── Data Sync ──────────────────────────────────────────────────────────────
 
 export interface SyncStatus {
