@@ -416,6 +416,20 @@ function initSchema(db: Database.Database) {
       synced_at       TEXT NOT NULL DEFAULT (datetime('now')),
       rows_synced     INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS _splan_entity_notes (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type         TEXT NOT NULL,
+      entity_id           INTEGER NOT NULL,
+      note_key            TEXT NOT NULL DEFAULT 'notes',
+      content             TEXT,
+      notes_fmt           TEXT NOT NULL DEFAULT '[]',
+      collapsed_sections  TEXT NOT NULL DEFAULT '{}',
+      embedded_tables     TEXT NOT NULL DEFAULT '{}',
+      created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(entity_type, entity_id, note_key)
+    );
   `);
 
   // Migrations: add columns to existing tables (safe to re-run — ignores if column exists)
@@ -435,6 +449,39 @@ function initSchema(db: Database.Database) {
   migrate('_splan_code_changes', 'linked_tables', "TEXT NOT NULL DEFAULT '[]'");
   migrate('_splan_code_changes', 'linked_fields', "TEXT NOT NULL DEFAULT '[]'");
   migrate('_splan_column_defs', 'formula', "TEXT NOT NULL DEFAULT ''");
+
+  // ─── F2: Extend _splan_sync_meta to record attempts (success + failure) ───
+  migrate('_splan_sync_meta', 'success', "INTEGER NOT NULL DEFAULT 1");
+  migrate('_splan_sync_meta', 'error_message', "TEXT");
+  migrate('_splan_sync_meta', 'source', "TEXT NOT NULL DEFAULT 'manual'");
+  migrate('_splan_sync_meta', 'attempt_id', "TEXT");
+  // Backfill attempt_id for any pre-F2 rows
+  try {
+    db.exec("UPDATE _splan_sync_meta SET attempt_id = 'legacy-' || id WHERE attempt_id IS NULL");
+  } catch { /* table missing or already filled */ }
+
+  // ─── Backfill _splan_entity_notes from existing concept notes (idempotent) ───
+  // Source columns on _splan_concepts stay populated as a safety net.
+  try {
+    const concepts = db.prepare(
+      "SELECT concept_id, notes, notes_fmt, collapsed_sections, embedded_tables FROM _splan_concepts WHERE notes IS NOT NULL AND notes != ''"
+    ).all() as Array<{ concept_id: number; notes: string; notes_fmt: string; collapsed_sections: string; embedded_tables: string }>;
+    const insertNote = db.prepare(
+      "INSERT OR IGNORE INTO _splan_entity_notes (entity_type, entity_id, note_key, content, notes_fmt, collapsed_sections, embedded_tables) VALUES ('concept', ?, 'notes', ?, ?, ?, ?)"
+    );
+    const txn = db.transaction((rows: typeof concepts) => {
+      for (const r of rows) {
+        insertNote.run(
+          r.concept_id,
+          r.notes,
+          r.notes_fmt || '[]',
+          r.collapsed_sections || '{}',
+          r.embedded_tables || '{}'
+        );
+      }
+    });
+    txn(concepts);
+  } catch { /* concepts table may not exist on first run */ }
 
   // ─── Apply user-defined columns from _splan_column_defs ───
   const ENTITY_SQL_TABLE: Record<string, string> = {

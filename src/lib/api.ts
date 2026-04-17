@@ -296,6 +296,82 @@ export async function deleteColumnDef(id: number): Promise<{ success: boolean }>
   return res.json();
 }
 
+// ─── Entity Notes (shared rich-notes store) ─────────────────────────────────
+
+export interface EntityNote {
+  id: number;
+  entityType: string;
+  entityId: number;
+  noteKey: string;
+  content: string | null;
+  notesFmt: unknown[];
+  collapsedSections: Record<string, unknown>;
+  embeddedTables: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchEntityNote(
+  entityType: string,
+  entityId: number,
+  noteKey: string
+): Promise<EntityNote | null> {
+  const url = `${BASE}/schema-planner/notes?entityType=${encodeURIComponent(entityType)}&entityId=${entityId}&noteKey=${encodeURIComponent(noteKey)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetchEntityNote failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchEntityNotes(
+  entityType: string,
+  entityId: number
+): Promise<EntityNote[]> {
+  const url = `${BASE}/schema-planner/notes?entityType=${encodeURIComponent(entityType)}&entityId=${entityId}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetchEntityNotes failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchEntityNotesByType(entityType: string): Promise<EntityNote[]> {
+  const url = `${BASE}/schema-planner/notes?entityType=${encodeURIComponent(entityType)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetchEntityNotesByType failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function saveEntityNote(data: {
+  entityType: string;
+  entityId: number;
+  noteKey?: string;
+  content: string | null;
+  notesFmt?: unknown;
+  collapsedSections?: unknown;
+  embeddedTables?: unknown;
+  reasoning?: string;
+}): Promise<EntityNote> {
+  const res = await fetch(`${BASE}/schema-planner/notes`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`saveEntityNote failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function deleteEntityNote(
+  entityType: string,
+  entityId: number,
+  noteKey?: string
+): Promise<{ success: boolean }> {
+  const res = await fetch(`${BASE}/schema-planner/notes`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entityType, entityId, noteKey }),
+  });
+  if (!res.ok) throw new Error(`deleteEntityNote failed: ${res.statusText}`);
+  return res.json();
+}
+
 // ─── Data Sync ──────────────────────────────────────────────────────────────
 
 export interface SyncStatus {
@@ -315,16 +391,42 @@ export async function fetchSyncStatus(): Promise<SyncStatus> {
   return res.json();
 }
 
-export async function syncPush(opts?: { force?: boolean }): Promise<{ success: boolean; totalRows: number; error?: string; conflict?: boolean; remoteChangeCount?: number }> {
-  const url = opts?.force ? `${BASE}/sync/push?force=true` : `${BASE}/sync/push`;
+export async function syncPush(opts?: { force?: boolean; source?: string }): Promise<{ success: boolean; totalRows: number; error?: string; conflict?: boolean; remoteChangeCount?: number; attemptId?: string }> {
+  const params = new URLSearchParams();
+  if (opts?.force) params.set('force', 'true');
+  if (opts?.source) params.set('source', opts.source);
+  const qs = params.toString();
+  const url = qs ? `${BASE}/sync/push?${qs}` : `${BASE}/sync/push`;
   const res = await fetch(url, { method: 'POST' });
   return res.json();
 }
 
-export async function syncPull(opts?: { force?: boolean }): Promise<{ success: boolean; totalRows: number; error?: string; conflict?: boolean; localChangeCount?: number }> {
-  const url = opts?.force ? `${BASE}/sync/pull?force=true` : `${BASE}/sync/pull`;
+export async function syncPull(opts?: { force?: boolean; source?: string }): Promise<{ success: boolean; totalRows: number; error?: string; conflict?: boolean; localChangeCount?: number; attemptId?: string }> {
+  const params = new URLSearchParams();
+  if (opts?.force) params.set('force', 'true');
+  if (opts?.source) params.set('source', opts.source);
+  const qs = params.toString();
+  const url = qs ? `${BASE}/sync/pull?${qs}` : `${BASE}/sync/pull`;
   const res = await fetch(url, { method: 'POST' });
   return res.json();
+}
+
+// F3: most-recent sync attempt (success or failure)
+export interface LastSyncAttempt {
+  id: string;
+  direction: 'push' | 'pull';
+  source: string;
+  success: boolean;
+  rowsSynced: number | null;
+  errorMessage: string | null;
+  attemptedAt: string;
+}
+
+export async function fetchLastSyncAttempt(): Promise<LastSyncAttempt | null> {
+  const res = await fetch(`${BASE}/sync/last-attempt`);
+  if (!res.ok) return null;
+  const json = await res.json() as { attempt: LastSyncAttempt | null };
+  return json.attempt;
 }
 
 // ─── Sync diff ───────────────────────────────────────────────────────────────

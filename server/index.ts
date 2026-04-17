@@ -7,6 +7,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { exec } from 'child_process';
 import { fileURLToPath } from 'url';
+import { v4 as uuidv4 } from 'uuid';
 import { getDb } from './db.js';
 import { parseRow, prepareRow, camelToSnake } from './utils.js';
 import { authRouter, authMiddleware } from './auth.js';
@@ -324,6 +325,10 @@ app.delete('/api/schema-planner', (req: Request, res: Response) => {
 
   db.prepare(`DELETE FROM ${meta.sqlTable} WHERE ${meta.idCol} = ?`).run(id);
 
+  // Cascade-delete any rich notes attached to this entity
+  db.prepare('DELETE FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ?')
+    .run(meta.entityType, id);
+
   if (tableName !== '_splan_grouping_presets' && tableName !== '_splan_view_presets' && tableName !== '_splan_change_log') {
     logChange({
       entityType: meta.entityType,
@@ -375,8 +380,9 @@ app.post('/api/column-defs', (req: Request, res: Response) => {
   const maxRow = db.prepare('SELECT MAX(sort_order) as mx FROM _splan_column_defs WHERE entity_type = ?').get(entityType) as { mx: number | null };
   const sortOrder = ((maxRow?.mx) ?? -1) + 1;
 
-  // Formula columns are virtual (computed client-side) — no real DB column needed
-  if (columnType !== 'formula') {
+  // Formula columns are virtual (computed client-side) — no real DB column needed.
+  // Notes columns store data in the shared _splan_entity_notes table — no real DB column needed.
+  if (columnType !== 'formula' && columnType !== 'notes') {
     const sqlType = columnType === 'int' ? 'INTEGER' : columnType === 'boolean' ? "INTEGER NOT NULL DEFAULT 0" : "TEXT NOT NULL DEFAULT ''";
     try {
       db.exec(`ALTER TABLE ${sqlTable} ADD COLUMN ${columnKey} ${sqlType}`);
@@ -403,8 +409,9 @@ app.delete('/api/column-defs/:id', (req: Request, res: Response) => {
 
   const sqlTable = ENTITY_SQL_TABLE[def.entity_type as string];
 
-  // Drop the column from the actual table (formula columns have no real DB column)
-  if (sqlTable && def.column_type !== 'formula') {
+  // Drop the column from the actual table.
+  // Formula columns are virtual; Notes columns live in _splan_entity_notes — neither has a real column to drop.
+  if (sqlTable && def.column_type !== 'formula' && def.column_type !== 'notes') {
     try {
       db.exec(`ALTER TABLE ${sqlTable} DROP COLUMN ${def.column_key}`);
     } catch {
@@ -412,7 +419,140 @@ app.delete('/api/column-defs/:id', (req: Request, res: Response) => {
     }
   }
 
+  // For Notes columns, also clean up any stored note rows for this column key
+  if (def.column_type === 'notes') {
+    try {
+      const entityType = (
+        Object.entries({
+          modules: 'module', features: 'feature', concepts: 'concept',
+          data_tables: 'table', data_fields: 'field',
+          projects: 'project', research: 'research', prototypes: 'prototype',
+        }).find(([k]) => k === def.entity_type)?.[1]
+      ) ?? String(def.entity_type);
+      db.prepare('DELETE FROM _splan_entity_notes WHERE entity_type = ? AND note_key = ?')
+        .run(entityType, def.column_key);
+    } catch { /* ignore */ }
+  }
+
   db.prepare('DELETE FROM _splan_column_defs WHERE id = ?').run(id);
+  return void res.json({ success: true });
+});
+
+// ─── Entity Notes (shared rich-notes store) ──────────────────────────────────
+// Stores rich-text notes for any (entityType, entityId, noteKey) tuple.
+// Used by built-in Notes columns and user-added 'notes'-typed custom columns.
+
+app.get('/api/schema-planner/notes', (req: Request, res: Response) => {
+  const entityType = String(req.query.entityType || '');
+  const entityIdRaw = req.query.entityId;
+  const noteKey = req.query.noteKey ? String(req.query.noteKey) : null;
+  if (!entityType) return void res.status(400).json({ error: 'entityType required' });
+
+  const db = getDb();
+
+  // Batch by entity type only — returns all notes for the type (used to populate grid badge cache)
+  if (entityIdRaw === undefined || entityIdRaw === '') {
+    const rows = db.prepare(
+      'SELECT * FROM _splan_entity_notes WHERE entity_type = ?'
+    ).all(entityType) as Record<string, unknown>[];
+    return void res.json(rows.map(parseRow));
+  }
+
+  const entityId = Number(entityIdRaw);
+  if (!entityId) return void res.status(400).json({ error: 'entityId must be a number' });
+
+  if (noteKey) {
+    const row = db.prepare(
+      'SELECT * FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ? AND note_key = ?'
+    ).get(entityType, entityId, noteKey) as Record<string, unknown> | undefined;
+    if (!row) return void res.json(null);
+    return void res.json(parseRow(row));
+  }
+  const rows = db.prepare(
+    'SELECT * FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ?'
+  ).all(entityType, entityId) as Record<string, unknown>[];
+  return void res.json(rows.map(parseRow));
+});
+
+app.put('/api/schema-planner/notes', (req: Request, res: Response) => {
+  const { entityType, entityId, noteKey = 'notes', content, notesFmt, collapsedSections, embeddedTables, reasoning } = req.body as {
+    entityType: string;
+    entityId: number;
+    noteKey?: string;
+    content?: string | null;
+    notesFmt?: unknown;
+    collapsedSections?: unknown;
+    embeddedTables?: unknown;
+    reasoning?: string;
+  };
+  if (!entityType || !entityId) return void res.status(400).json({ error: 'entityType and entityId required' });
+
+  const db = getDb();
+  const existing = db.prepare(
+    'SELECT * FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ? AND note_key = ?'
+  ).get(entityType, entityId, noteKey) as Record<string, unknown> | undefined;
+
+  const fmtJson = JSON.stringify(notesFmt ?? []);
+  const collapsedJson = JSON.stringify(collapsedSections ?? {});
+  const tablesJson = JSON.stringify(embeddedTables ?? {});
+  const updatedAt = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
+  if (existing) {
+    db.prepare(
+      'UPDATE _splan_entity_notes SET content = ?, notes_fmt = ?, collapsed_sections = ?, embedded_tables = ?, updated_at = ? WHERE id = ?'
+    ).run(content ?? null, fmtJson, collapsedJson, tablesJson, updatedAt, existing.id);
+  } else {
+    db.prepare(
+      'INSERT INTO _splan_entity_notes (entity_type, entity_id, note_key, content, notes_fmt, collapsed_sections, embedded_tables) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(entityType, entityId, noteKey, content ?? null, fmtJson, collapsedJson, tablesJson);
+  }
+
+  // Single change-log entry per save (covers content + formatting changes together).
+  // Only log if anything actually changed.
+  const oldContent = existing ? (existing.content ?? '') : '';
+  const oldFmt = existing ? (existing.notes_fmt ?? '[]') : '[]';
+  const oldCollapsed = existing ? (existing.collapsed_sections ?? '{}') : '{}';
+  const oldTables = existing ? (existing.embedded_tables ?? '{}') : '{}';
+  const newContent = content ?? '';
+  const changed =
+    String(oldContent) !== String(newContent) ||
+    String(oldFmt) !== fmtJson ||
+    String(oldCollapsed) !== collapsedJson ||
+    String(oldTables) !== tablesJson;
+
+  if (changed) {
+    logChange({
+      entityType,
+      entityId,
+      action: existing ? 'UPDATE' : 'INSERT',
+      fieldChanged: noteKey,
+      oldValue: oldContent,
+      newValue: newContent,
+      reasoning: reasoning ?? `Notes edit: ${noteKey}`,
+    });
+  }
+
+  const fresh = db.prepare(
+    'SELECT * FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ? AND note_key = ?'
+  ).get(entityType, entityId, noteKey) as Record<string, unknown>;
+  return void res.json(parseRow(fresh));
+});
+
+app.delete('/api/schema-planner/notes', (req: Request, res: Response) => {
+  const { entityType, entityId, noteKey } = req.body as {
+    entityType: string;
+    entityId: number;
+    noteKey?: string;
+  };
+  if (!entityType || !entityId) return void res.status(400).json({ error: 'entityType and entityId required' });
+  const db = getDb();
+  if (noteKey) {
+    db.prepare('DELETE FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ? AND note_key = ?')
+      .run(entityType, entityId, noteKey);
+  } else {
+    db.prepare('DELETE FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ?')
+      .run(entityType, entityId);
+  }
   return void res.json({ success: true });
 });
 
@@ -575,6 +715,7 @@ app.post('/api/display-templates/seed', (req: Request, res: Response) => {
     'image-carousel': 'Count Badge',
     'test-count': 'Count Badge',
     'note-fullscreen': 'Count Badge',
+    'notes': 'Count Badge',
     'formula': 'Plain Text',
     'checklist': 'Plain Text',
     'platforms': 'Outline Badge',
@@ -1512,6 +1653,49 @@ function getSyncAuth(): { cookie: string; baseUrl: string } | null {
   return { cookie: `splan_session=${token}`, baseUrl: SYNC_REMOTE_URL.replace(/\/+$/, '') };
 }
 
+// F2: record a sync attempt (success or failure) into _splan_sync_meta.
+// Returns the attempt_id so it can be surfaced in API responses.
+function recordSyncAttempt(params: {
+  direction: 'push' | 'pull';
+  source: string;
+  success: boolean;
+  remoteUrl?: string;
+  rowsSynced?: number;
+  errorMessage?: string;
+}): { attemptId: string } {
+  const attemptId = uuidv4();
+  try {
+    getDb().prepare(
+      `INSERT INTO _splan_sync_meta
+        (sync_direction, remote_url, rows_synced, success, error_message, source, attempt_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      params.direction,
+      params.remoteUrl || '',
+      params.rowsSynced ?? 0,
+      params.success ? 1 : 0,
+      params.errorMessage ?? null,
+      params.source,
+      attemptId,
+    );
+  } catch {
+    // Pre-F2 schemas (e.g., remote during the F2 deploy gap) lack the new columns.
+    // Fall back to the legacy 4-column insert so we don't crash the request.
+    try {
+      getDb().prepare(
+        'INSERT INTO _splan_sync_meta (sync_direction, remote_url, rows_synced) VALUES (?, ?, ?)'
+      ).run(params.direction, params.remoteUrl || '', params.rowsSynced ?? 0);
+    } catch { /* swallow — recording is non-critical */ }
+  }
+  return { attemptId };
+}
+
+function normalizeSource(input: unknown, fallback: string): string {
+  if (typeof input !== 'string') return fallback;
+  const trimmed = input.trim();
+  return trimmed ? trimmed : fallback;
+}
+
 // Check if remote has changes since last sync
 app.get('/api/sync/remote-status', async (_req: Request, res: Response) => {
   if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
@@ -1578,6 +1762,9 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
   // Server-side guardrails. ?force=true bypasses the change-count check but NOT
   // the schema check — a schema mismatch can't be meaningfully force-overridden.
   const force = req.query.force === 'true' || (req.body as { force?: boolean })?.force === true;
+  const sourceRaw = (req.query.source as string | undefined) ?? (req.body as { source?: string } | undefined)?.source;
+  const source = normalizeSource(sourceRaw, force ? 'force-push' : 'manual-push');
+
   try {
     const remote = await fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } });
     if (remote.ok) {
@@ -1588,19 +1775,25 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
         const remoteSet = new Set(s.schemaTables);
         const missingOnRemote = getSchemaTables().filter(t => !remoteSet.has(t));
         if (missingOnRemote.length > 0) {
+          const errMsg = `Schema mismatch: remote is missing ${missingOnRemote.length} table(s) (${missingOnRemote.slice(0, 3).join(', ')}${missingOnRemote.length > 3 ? '…' : ''}). Deploy Code first so remote's schema matches.`;
+          const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg });
           return void res.status(409).json({
-            error: `Schema mismatch: remote is missing ${missingOnRemote.length} table(s) (${missingOnRemote.slice(0, 3).join(', ')}${missingOnRemote.length > 3 ? '…' : ''}). Deploy Code first so remote's schema matches.`,
+            error: errMsg,
             schemaMismatch: true,
             missingOnRemote,
+            attemptId,
           });
         }
       }
 
       if (!force && s.changeCount > 0) {
+        const errMsg = `Remote has ${s.changeCount} unsynced change(s). Pull first, or retry with force=true to overwrite remote.`;
+        const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg });
         return void res.status(409).json({
-          error: `Remote has ${s.changeCount} unsynced change(s). Pull first, or retry with force=true to overwrite remote.`,
+          error: errMsg,
           conflict: true,
           remoteChangeCount: s.changeCount,
+          attemptId,
         });
       }
     }
@@ -1632,18 +1825,19 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
 
     if (!importRes.ok) {
       const errText = await importRes.text();
-      return void res.status(500).json({ error: `Remote import failed: ${errText.substring(0, 300)}` });
+      const errMsg = `Remote import failed: ${errText.substring(0, 300)}`;
+      const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg });
+      return void res.status(500).json({ error: errMsg, attemptId });
     }
 
     const result = await importRes.json() as { success: boolean; imported: Record<string, number> };
 
-    // Record sync locally
-    db.prepare('INSERT INTO _splan_sync_meta (sync_direction, remote_url, rows_synced) VALUES (?, ?, ?)')
-      .run('push', auth.baseUrl, totalRows);
-
-    return void res.json({ success: true, totalRows, imported: result.imported });
+    const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: true, remoteUrl: auth.baseUrl, rowsSynced: totalRows });
+    return void res.json({ success: true, totalRows, imported: result.imported, attemptId });
   } catch (e: unknown) {
-    return void res.status(500).json({ error: (e as Error).message });
+    const errMsg = (e as Error).message;
+    const { attemptId } = recordSyncAttempt({ direction: 'push', source, success: false, remoteUrl: auth.baseUrl, errorMessage: errMsg });
+    return void res.status(500).json({ error: errMsg, attemptId });
   }
 });
 
@@ -1654,6 +1848,9 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
   if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
 
   const force = req.query.force === 'true' || (req.body as { force?: boolean })?.force === true;
+  const sourceRaw = (req.query.source as string | undefined) ?? (req.body as { source?: string } | undefined)?.source;
+  const source = normalizeSource(sourceRaw, force ? 'force-pull' : 'manual-pull');
+  const remoteUrlForLog = auth.baseUrl;
 
   // Schema check: if remote has tables local doesn't, a pull would silently skip
   // the data in those tables (db-import skips unknown tables). Block regardless of force.
@@ -1665,10 +1862,13 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
         const localSet = new Set(getSchemaTables());
         const missingOnLocal = s.schemaTables.filter(t => !localSet.has(t));
         if (missingOnLocal.length > 0) {
+          const errMsg = `Schema mismatch: local is missing ${missingOnLocal.length} table(s) (${missingOnLocal.slice(0, 3).join(', ')}${missingOnLocal.length > 3 ? '…' : ''}). Deploy Code on the local side or re-pull the codebase first.`;
+          const { attemptId } = recordSyncAttempt({ direction: 'pull', source, success: false, remoteUrl: remoteUrlForLog, errorMessage: errMsg });
           return void res.status(409).json({
-            error: `Schema mismatch: local is missing ${missingOnLocal.length} table(s) (${missingOnLocal.slice(0, 3).join(', ')}${missingOnLocal.length > 3 ? '…' : ''}). Deploy Code on the local side or re-pull the codebase first.`,
+            error: errMsg,
             schemaMismatch: true,
             missingOnLocal,
+            attemptId,
           });
         }
       }
@@ -1685,10 +1885,13 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
         'SELECT COUNT(*) as cnt FROM _splan_change_log WHERE changed_at > ?'
       ).get(lastSync.synced_at) as { cnt: number }).cnt;
       if (localCount > 0) {
+        const errMsg = `Local has ${localCount} unsynced change(s). Push first, or retry with force=true to discard local changes.`;
+        const { attemptId } = recordSyncAttempt({ direction: 'pull', source, success: false, remoteUrl: remoteUrlForLog, errorMessage: errMsg });
         return void res.status(409).json({
-          error: `Local has ${localCount} unsynced change(s). Push first, or retry with force=true to discard local changes.`,
+          error: errMsg,
           conflict: true,
           localChangeCount: localCount,
+          attemptId,
         });
       }
     }
@@ -1698,7 +1901,11 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
 
   try {
     const exportRes = await fetch(`${auth.baseUrl}/api/db-export`, { headers: { Cookie: auth.cookie } });
-    if (!exportRes.ok) return void res.status(500).json({ error: `Remote export failed: ${exportRes.status}` });
+    if (!exportRes.ok) {
+      const errMsg = `Remote export failed: ${exportRes.status}`;
+      const { attemptId } = recordSyncAttempt({ direction: 'pull', source, success: false, remoteUrl: remoteUrlForLog, errorMessage: errMsg });
+      return void res.status(500).json({ error: errMsg, attemptId });
+    }
 
     // Safety check: don't overwrite a full local DB with an empty remote
     const db0 = getDb();
@@ -1713,9 +1920,9 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
       + (tables['_splan_data_tables']?.length || 0) + (tables['_splan_concepts']?.length || 0);
 
     if (localTotal > 100 && remoteTotal === 0) {
-      return void res.status(400).json({
-        error: `Safety check: local has ${localTotal} rows in core tables but remote has 0. The remote may have been wiped by a redeploy. Push your local data first instead.`,
-      });
+      const errMsg = `Safety check: local has ${localTotal} rows in core tables but remote has 0. The remote may have been wiped by a redeploy. Push your local data first instead.`;
+      const { attemptId } = recordSyncAttempt({ direction: 'pull', source, success: false, remoteUrl: remoteUrlForLog, errorMessage: errMsg });
+      return void res.status(400).json({ error: errMsg, attemptId });
     }
 
     const db = getDb();
@@ -1767,8 +1974,7 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
       db.pragma('foreign_keys = ON');
     }
 
-    db.prepare('INSERT INTO _splan_sync_meta (sync_direction, remote_url, rows_synced) VALUES (?, ?, ?)')
-      .run('pull', auth.baseUrl, totalRows);
+    const { attemptId } = recordSyncAttempt({ direction: 'pull', source, success: true, remoteUrl: remoteUrlForLog, rowsSynced: totalRows });
 
     // Tell the remote that its changes were consumed (so remote sync-status resets)
     try {
@@ -1779,9 +1985,11 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
       });
     } catch { /* non-critical — remote badge may stay yellow until next push */ }
 
-    return void res.json({ success: true, totalRows });
+    return void res.json({ success: true, totalRows, attemptId });
   } catch (e: unknown) {
-    return void res.status(500).json({ error: (e as Error).message });
+    const errMsg = (e as Error).message;
+    const { attemptId } = recordSyncAttempt({ direction: 'pull', source, success: false, remoteUrl: remoteUrlForLog, errorMessage: errMsg });
+    return void res.status(500).json({ error: errMsg, attemptId });
   }
 });
 
@@ -1944,6 +2152,52 @@ app.get('/api/sync/diff', async (_req: Request, res: Response) => {
   } catch (e: unknown) {
     return void res.status(500).json({ error: (e as Error).message });
   }
+});
+
+// F3: Most recent sync attempt (success or failure) — drives the sidebar dot + banner
+app.get('/api/sync/last-attempt', (_req: Request, res: Response) => {
+  const db = getDb();
+  let row: {
+    attempt_id: string | null;
+    sync_direction: string;
+    source: string | null;
+    success: number | null;
+    rows_synced: number | null;
+    error_message: string | null;
+    synced_at: string;
+    id: number;
+  } | undefined;
+  try {
+    row = db.prepare(
+      `SELECT attempt_id, sync_direction, source, success, rows_synced, error_message, synced_at, id
+         FROM _splan_sync_meta
+         ORDER BY synced_at DESC, id DESC
+         LIMIT 1`
+    ).get() as typeof row;
+  } catch {
+    // Pre-F2 schema: fall back to legacy columns
+    try {
+      const legacy = db.prepare(
+        'SELECT id, sync_direction, rows_synced, synced_at FROM _splan_sync_meta ORDER BY synced_at DESC, id DESC LIMIT 1'
+      ).get() as { id: number; sync_direction: string; rows_synced: number; synced_at: string } | undefined;
+      if (legacy) {
+        row = { attempt_id: `legacy-${legacy.id}`, sync_direction: legacy.sync_direction, source: 'manual', success: 1, rows_synced: legacy.rows_synced, error_message: null, synced_at: legacy.synced_at, id: legacy.id };
+      }
+    } catch { /* table missing */ }
+  }
+  if (!row) return void res.json({ attempt: null });
+  const direction = row.sync_direction === 'pull' ? 'pull' : 'push';
+  return void res.json({
+    attempt: {
+      id: row.attempt_id || `legacy-${row.id}`,
+      direction,
+      source: row.source || 'manual',
+      success: row.success == null ? true : row.success === 1,
+      rowsSynced: row.rows_synced,
+      errorMessage: row.error_message,
+      attemptedAt: row.synced_at,
+    },
+  });
 });
 
 // Deploy code: git add, commit, push (local-only — shells out to git)
@@ -2186,12 +2440,10 @@ app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: 
     db.pragma('foreign_keys = ON');
   }
 
-  // Record sync metadata
+  // Record sync metadata (remote side records the inbound push as a "push" attempt)
   const totalImported = Object.values(imported).reduce((a, b) => a + b, 0);
   const remoteUrl = req.headers['x-sync-source'] as string || 'unknown';
-  db.prepare(
-    'INSERT INTO _splan_sync_meta (sync_direction, remote_url, rows_synced) VALUES (?, ?, ?)'
-  ).run('push', remoteUrl, totalImported);
+  recordSyncAttempt({ direction: 'push', source: 'inbound', success: true, remoteUrl, rowsSynced: totalImported });
 
   return void res.json({ success: true, imported });
 });

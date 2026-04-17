@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import AgentsTab from "../components/schema-planner/AgentsTab";
 import NotebookTab from "../components/schema-planner/NotebookTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
-import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, type SyncStatus, type AppMode, type SyncDiff } from "../lib/api";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt } from "../lib/api";
 import SyncDiffViewer from "../components/schema-planner/SyncDiffViewer";
+import AutoSyncToast from "../components/schema-planner/AutoSyncToast";
 
 const START_COMMANDS = [
   { cmd: "/nexus-start", desc: "Start or restart March Nexus dev server" },
@@ -146,6 +147,110 @@ function useRefAppearance(): [Record<string, string>, (c: Record<string, string>
   return [colors, saveColors, icons, saveIcons];
 }
 
+// F1.4: tolerant commit-hash comparison (case, whitespace, full-vs-short)
+function commitsMatch(a: string | null, b: string | null): boolean {
+  if (!a || !b) return false;
+  const na = a.trim().toLowerCase();
+  const nb = b.trim().toLowerCase();
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  return na.startsWith(nb) || nb.startsWith(na);
+}
+
+// F4 helpers
+function formatRelative(iso: string): string {
+  const ts = Date.parse(iso.includes('Z') || /[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+  if (Number.isNaN(ts)) return iso;
+  const diff = Date.now() - ts;
+  const sec = Math.round(diff / 1000);
+  if (sec < 5) return 'just now';
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} minute${min === 1 ? '' : 's'} ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`;
+  const day = Math.round(hr / 24);
+  return `${day} day${day === 1 ? '' : 's'} ago`;
+}
+
+function formatLocalTime(iso: string): string {
+  const ts = Date.parse(iso.includes('Z') || /[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+  if (Number.isNaN(ts)) return iso;
+  return new Date(ts).toLocaleTimeString();
+}
+
+function humanizeSource(src: string): string {
+  return src
+    .split('-')
+    .map(w => w ? w[0].toUpperCase() + w.slice(1) : w)
+    .join(' ');
+}
+
+// F5: localStorage helpers for dismissed-attempt IDs
+const DISMISSED_KEY = 'splan_dismissedAttempts';
+const DISMISSED_MAX = 50;
+
+function readDismissed(): string[] {
+  try {
+    const raw = localStorage.getItem(DISMISSED_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) throw new Error('not an array');
+    return arr.filter(x => typeof x === 'string');
+  } catch {
+    try { localStorage.setItem(DISMISSED_KEY, '[]'); } catch { /* ignore */ }
+    return [];
+  }
+}
+
+function writeDismissed(list: string[]): void {
+  try {
+    const trimmed = list.slice(-DISMISSED_MAX);
+    localStorage.setItem(DISMISSED_KEY, JSON.stringify(trimmed));
+  } catch { /* storage full — banner just won't stay dismissed across reloads */ }
+}
+
+// F8: pending-deploy persistence
+interface PendingDeploy {
+  targetCommit: string;
+  startTime: number;
+  filesChanged: number;
+  remoteUrl?: string;
+}
+
+const PENDING_DEPLOY_KEY = 'splan_pendingDeploy';
+const PENDING_DEPLOY_MAX_AGE_MS = 30 * 60 * 1000;
+
+function readPendingDeploy(): PendingDeploy | null {
+  try {
+    const raw = localStorage.getItem(PENDING_DEPLOY_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj.targetCommit === 'string' && typeof obj.startTime === 'number') return obj;
+    return null;
+  } catch { return null; }
+}
+
+function writePendingDeploy(p: PendingDeploy): void {
+  try { localStorage.setItem(PENDING_DEPLOY_KEY, JSON.stringify(p)); } catch { /* ignore */ }
+}
+
+function clearPendingDeploy(): void {
+  try { localStorage.removeItem(PENDING_DEPLOY_KEY); } catch { /* ignore */ }
+}
+
+// F6: shouldAutoSync logic
+function shouldAutoSync(status: SyncStatus | null, autoSyncEnabled: boolean): 'push' | 'pull' | null {
+  if (!autoSyncEnabled) return null;
+  if (!status || !status.configured) return null;
+  if (status.schema && !status.schema.match) return null;
+  const local = status.local?.changeCount ?? 0;
+  const remote = status.remote?.changeCount ?? 0;
+  if (local > 0 && remote === 0) return 'push';
+  if (remote > 0 && local === 0) return 'pull';
+  return null;
+}
+
 function useDepthColors(): [string[], (colors: string[]) => void] {
   const [colors, setColors] = useState<string[]>(() => {
     try { const s = localStorage.getItem("splan_depth_colors"); return s ? JSON.parse(s) : DEFAULT_DEPTH_COLORS; } catch { return DEFAULT_DEPTH_COLORS; }
@@ -165,6 +270,12 @@ export default function SchemaPlanner() {
   const [githubPatSaved, setGithubPatSaved] = useState(false);
   const [showPat, setShowPat] = useState(false);
 
+  // Active tab (computed early so sync effects can depend on it)
+  const ALL_VALID_TABS = [...SUB_TABS, "prototypes", "projects", "agents", "settings", "notebook"];
+  const activeTab = ALL_VALID_TABS.includes(searchParams.get("sptab") || "modules")
+    ? (searchParams.get("sptab") || "modules")
+    : "modules";
+
   // Sync state
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncLoading, setSyncLoading] = useState<'push' | 'pull' | 'deploy' | 'diff' | null>(null);
@@ -172,6 +283,41 @@ export default function SchemaPlanner() {
   const [deployProgress, setDeployProgress] = useState<{ status: string; elapsed: number; targetCommit: string } | null>(null);
   const [syncDiff, setSyncDiff] = useState<SyncDiff | null>(null);
   const [showDiff, setShowDiff] = useState(false);
+
+  // F4: last sync attempt + popover
+  const [lastAttempt, setLastAttempt] = useState<LastSyncAttempt | null>(null);
+  const [popoverOpen, setPopoverOpen] = useState(false);
+
+  // F5: dismissed attempt IDs
+  const [dismissedAttempts, setDismissedAttempts] = useState<string[]>(() => readDismissed());
+
+  // F11: auto-sync toggle (default on)
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(() => {
+    const raw = localStorage.getItem('splan_autoSyncEnabled');
+    return raw === null ? true : raw === 'true';
+  });
+  useEffect(() => { localStorage.setItem('splan_autoSyncEnabled', String(autoSyncEnabled)); }, [autoSyncEnabled]);
+
+  // F12: tab-title notifications toggle (default on)
+  const [tabTitleNotifications, setTabTitleNotifications] = useState<boolean>(() => {
+    const raw = localStorage.getItem('splan_tabTitleNotifications');
+    return raw === null ? true : raw === 'true';
+  });
+  useEffect(() => { localStorage.setItem('splan_tabTitleNotifications', String(tabTitleNotifications)); }, [tabTitleNotifications]);
+
+  // F7: remote version badge
+  const [versionState, setVersionState] = useState<{
+    local: string | null; remote: string | null; match: boolean; checkedAt: string;
+  } | null>(null);
+
+  // F6: auto-sync toast (changing toastKey re-fires toast)
+  const [toastMessage, setToastMessage] = useState<string>('');
+  const [toastKey, setToastKey] = useState<number>(0);
+
+  // F6/F8: refs (React 19 requires explicit initial value)
+  const hasAutoSyncedOnMount = useRef<boolean>(false);
+  const originalTitleRef = useRef<string>(typeof document !== 'undefined' ? document.title : '');
+  const deployTitleStateRef = useRef<'idle' | 'progress' | 'success' | 'fail'>('idle');
 
   // App mode (local vs hosted) — gates dev-only UI surfaces
   const [appMode, setAppMode] = useState<AppMode>('local');
@@ -189,45 +335,93 @@ export default function SchemaPlanner() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleSyncPush = useCallback(async (force = false) => {
+  // F4: poll last-attempt every 30s
+  useEffect(() => {
+    const load = () => fetchLastSyncAttempt().then(setLastAttempt).catch(() => {});
+    load();
+    const interval = setInterval(load, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const refreshLastAttempt = useCallback(() => {
+    fetchLastSyncAttempt().then(setLastAttempt).catch(() => {});
+  }, []);
+
+  type SyncOpts = { force?: boolean; source?: string; followUpCount?: number };
+
+  const handleSyncPush = useCallback(async (opts: SyncOpts | boolean = false) => {
+    const force = typeof opts === 'boolean' ? opts : !!opts.force;
+    const source = typeof opts === 'boolean' ? undefined : opts.source;
+    const followUpCount = typeof opts === 'boolean' ? 0 : (opts.followUpCount ?? 0);
+    const isAuto = source === 'auto-push';
+    const localBefore = syncStatus?.local?.changeCount ?? 0;
+
     setSyncLoading('push');
     setSyncResult(null);
     try {
-      const result = await syncPush(force ? { force: true } : undefined);
+      const result = await syncPush({ force: force || undefined, source });
       if (result.success) {
-        setSyncResult(force ? `Force-pushed ${result.totalRows} rows to remote (remote changes discarded)` : `Pushed ${result.totalRows} rows to remote`);
+        setSyncResult(force ? `✅ Force-pushed ${result.totalRows} rows to remote (remote changes discarded)` : `✅ Pushed ${result.totalRows} rows to remote`);
         setSyncDiff(null);
         setShowDiff(false);
+        if (isAuto) {
+          setToastMessage(`✅ Auto-synced: pushed ${result.totalRows} rows`);
+          setToastKey(k => k + 1);
+        }
       } else {
-        setSyncResult(`Push failed: ${result.error}`);
+        setSyncResult(`❌ Push FAILED: ${result.error}`);
       }
-      fetchSyncStatus().then(setSyncStatus).catch(() => {});
+      const fresh = await fetchSyncStatus().catch(() => null);
+      if (fresh) setSyncStatus(fresh);
+      refreshLastAttempt();
+
+      // F13: if auto-push succeeded but new local changes accumulated mid-flight, follow up
+      if (isAuto && result.success && fresh) {
+        const localAfter = fresh.local?.changeCount ?? 0;
+        if (localAfter > 0 && localAfter >= localBefore /* sanity: server didn't already drain it */ && followUpCount < 2) {
+          setSyncResult(`ℹ️ Additional changes accumulated during sync — running follow-up push...`);
+          setTimeout(() => { void handleSyncPush({ source: 'auto-push', followUpCount: followUpCount + 1 }); }, 0);
+        } else if (isAuto && localAfter > 0 && followUpCount >= 2) {
+          setSyncResult(`ℹ️ ${localAfter} local change(s) still pending after follow-ups. Click Push Data to send them.`);
+        }
+      }
     } catch (e) {
-      setSyncResult(`Push failed: ${(e as Error).message}`);
+      setSyncResult(`❌ Push FAILED: ${(e as Error).message}`);
+      refreshLastAttempt();
     } finally {
       setSyncLoading(null);
     }
-  }, []);
+  }, [syncStatus?.local?.changeCount, refreshLastAttempt]);
 
-  const handleSyncPull = useCallback(async (force = false) => {
+  const handleSyncPull = useCallback(async (opts: SyncOpts | boolean = false) => {
+    const force = typeof opts === 'boolean' ? opts : !!opts.force;
+    const source = typeof opts === 'boolean' ? undefined : opts.source;
+    const isAuto = source === 'auto-pull';
+
     setSyncLoading('pull');
     setSyncResult(null);
     try {
-      const result = await syncPull(force ? { force: true } : undefined);
+      const result = await syncPull({ force: force || undefined, source });
       if (result.success) {
-        setSyncResult(force ? `Force-pulled ${result.totalRows} rows from remote (local changes discarded)` : `Pulled ${result.totalRows} rows from remote`);
+        setSyncResult(force ? `✅ Force-pulled ${result.totalRows} rows from remote (local changes discarded)` : `✅ Pulled ${result.totalRows} rows from remote`);
         setSyncDiff(null);
         setShowDiff(false);
+        if (isAuto) {
+          setToastMessage(`✅ Auto-synced: pulled ${result.totalRows} rows`);
+          setToastKey(k => k + 1);
+        }
       } else {
-        setSyncResult(`Pull failed: ${result.error}`);
+        setSyncResult(`❌ Pull FAILED: ${result.error}`);
       }
       fetchSyncStatus().then(setSyncStatus).catch(() => {});
+      refreshLastAttempt();
     } catch (e) {
-      setSyncResult(`Pull failed: ${(e as Error).message}`);
+      setSyncResult(`❌ Pull FAILED: ${(e as Error).message}`);
+      refreshLastAttempt();
     } finally {
       setSyncLoading(null);
     }
-  }, []);
+  }, [refreshLastAttempt]);
 
   const handleLoadDiff = useCallback(async () => {
     setSyncLoading('diff');
@@ -255,19 +449,144 @@ export default function SchemaPlanner() {
     await handleSyncPull(true);
   }, [syncStatus, handleSyncPull]);
 
+  // F9: helper to set tab title only when hidden + setting on
+  const setDeployTitle = useCallback((state: 'progress' | 'success' | 'fail') => {
+    if (!tabTitleNotifications) return;
+    deployTitleStateRef.current = state;
+    if (typeof document === 'undefined') return;
+    if (document.visibilityState !== 'hidden') return;
+    const original = originalTitleRef.current || 'Schema Planner';
+    if (state === 'progress') document.title = `⏳ Deploying — ${original}`;
+    else if (state === 'success') document.title = `✅ Deploy complete — ${original}`;
+    else document.title = `❌ Deploy failed — ${original}`;
+  }, [tabTitleNotifications]);
+
+  const restoreTitle = useCallback(() => {
+    deployTitleStateRef.current = 'idle';
+    if (typeof document === 'undefined') return;
+    if (originalTitleRef.current) document.title = originalTitleRef.current;
+  }, []);
+
+  // F7: refresh local + remote version
+  const refreshVersionState = useCallback(async () => {
+    const remoteUrl = syncStatus?.remoteUrl;
+    try {
+      const localPromise = fetchVersion();
+      const remotePromise = remoteUrl ? fetchVersion(remoteUrl) : Promise.resolve({ commit: null });
+      const [local, remote] = await Promise.all([localPromise, remotePromise]);
+      setVersionState({
+        local: local.commit,
+        remote: remote.commit,
+        match: commitsMatch(local.commit, remote.commit),
+        checkedAt: new Date().toISOString(),
+      });
+    } catch {
+      setVersionState(prev => prev ?? { local: null, remote: null, match: false, checkedAt: new Date().toISOString() });
+    }
+  }, [syncStatus?.remoteUrl]);
+
+  // F6: refresh status after deploy, then re-arm auto-sync mount flag so it can fire once more
+  const finalizeDeploy = useCallback(async () => {
+    const fresh = await fetchSyncStatus().catch(() => null);
+    if (fresh) setSyncStatus(fresh);
+    refreshLastAttempt();
+    refreshVersionState();
+    hasAutoSyncedOnMount.current = false;
+  }, [refreshLastAttempt, refreshVersionState]);
+
+  // F8/F1: shared poll-loop runner, callable from initial deploy AND from resume
+  const startDeployPolling = useCallback((targetCommit: string, startTime: number, remoteUrl: string) => {
+    setDeployTitle('progress');
+    const poll = setInterval(async () => {
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      try {
+        const remote = await fetchVersion(remoteUrl);
+        if (commitsMatch(remote.commit, targetCommit)) {
+          clearInterval(poll);
+          setDeployProgress({ status: `Live — pushing data...`, elapsed, targetCommit });
+          try {
+            const pushResult = await syncPush({ source: 'deploy-push' });
+            if (pushResult.success) {
+              setSyncResult(`✅ Deploy complete: commit ${targetCommit} (${elapsed}s) + pushed ${pushResult.totalRows} rows`);
+              setDeployTitle('success');
+            } else {
+              setSyncResult(`❌ Deploy succeeded but data push FAILED: ${pushResult.error}. Click Push Data now to retry.`);
+              setDeployTitle('fail');
+            }
+          } catch (e) {
+            setSyncResult(`❌ Deploy succeeded but data push FAILED: ${(e as Error).message}. Click Push Data now to retry.`);
+            setDeployTitle('fail');
+          }
+          setDeployProgress(null);
+          clearPendingDeploy();
+          finalizeDeploy();
+          return;
+        }
+        const mins = Math.floor(elapsed / 60);
+        const secs = elapsed % 60;
+        const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+        setDeployProgress({
+          status: elapsed < 120 ? `Building on Railway... ${timeStr}` : `Deploying... ${timeStr}`,
+          elapsed,
+          targetCommit,
+        });
+      } catch {
+        const elapsed2 = Math.round((Date.now() - startTime) / 1000);
+        setDeployProgress({ status: `Deploying... ${elapsed2}s`, elapsed: elapsed2, targetCommit });
+      }
+
+      if (elapsed > 600) {
+        clearInterval(poll);
+        setDeployProgress(null);
+        try {
+          const pushResult = await syncPush({ source: 'deploy-push' });
+          if (pushResult.success) {
+            setSyncResult(`⚠️ Deploy timed out after 10 minutes but data push succeeded (${pushResult.totalRows} rows). Remote may still be on the old code — check Railway.`);
+            setDeployTitle('fail');
+          } else if (pushResult.conflict || /schema/i.test(pushResult.error || '')) {
+            setSyncResult(`❌ Deploy timed out AND data push blocked: schema mismatch. Check Railway dashboard manually.`);
+            setDeployTitle('fail');
+          } else {
+            setSyncResult(`❌ Deploy timed out AND data push FAILED: ${pushResult.error}. Click Push Data to retry.`);
+            setDeployTitle('fail');
+          }
+        } catch (e) {
+          setSyncResult(`❌ Deploy timed out AND data push FAILED: ${(e as Error).message}. Click Push Data to retry.`);
+          setDeployTitle('fail');
+        }
+        clearPendingDeploy();
+        finalizeDeploy();
+      }
+    }, 10000);
+  }, [setDeployTitle, finalizeDeploy]);
+
   const handleDeployCode = useCallback(async () => {
     setSyncLoading('deploy');
     setSyncResult(null);
     setDeployProgress(null);
+    // F8: a fresh deploy supersedes any prior pending deploy
+    clearPendingDeploy();
+
+    // F1.1: refresh sync status at click time (cached status may be stale or undefined)
+    let freshStatus: SyncStatus | null = null;
+    try { freshStatus = await fetchSyncStatus(); } catch { /* fall through */ }
+    if (freshStatus) setSyncStatus(freshStatus);
+    const remoteUrl = freshStatus?.remoteUrl || syncStatus?.remoteUrl || '';
+    if (!remoteUrl) {
+      setSyncResult("❌ Can't deploy: remote is not configured or unreachable. Set SYNC_REMOTE_URL and try again.");
+      setSyncLoading(null);
+      return;
+    }
+
     try {
       const result = await deployCode();
       if (!result.success) {
-        setSyncResult(`Deploy failed: ${result.error}`);
+        setSyncResult(`❌ Deploy FAILED: ${result.error}. Click Deploy Code to retry.`);
         setSyncLoading(null);
         return;
       }
       if (result.status === 'nothing') {
-        setSyncResult(result.message);
+        setSyncResult(`✅ ${result.message}`);
         setSyncLoading(null);
         return;
       }
@@ -277,63 +596,90 @@ export default function SchemaPlanner() {
       setDeployProgress({ status: 'Pushed — waiting for Railway build...', elapsed: 0, targetCommit });
       setSyncLoading(null);
 
-      // Poll remote /api/version every 10s until commit matches or 5min timeout
-      const remoteUrl = syncStatus?.remoteUrl || '';
-      if (!remoteUrl || !targetCommit) {
-        setSyncResult(`Pushed ${result.filesChanged} file(s) — ${targetCommit}`);
+      if (!targetCommit) {
+        setSyncResult(`❌ Deploy succeeded on git but server returned no commit hash — can't verify Railway. Check the Railway dashboard manually.`);
         setDeployProgress(null);
         return;
       }
 
-      const poll = setInterval(async () => {
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        try {
-          const remote = await fetchVersion(remoteUrl);
-          if (remote.commit === targetCommit) {
-            clearInterval(poll);
-            setDeployProgress({ status: `Live — pushing data...`, elapsed, targetCommit });
-            // Auto-push data after successful deploy
-            try {
-              const pushResult = await syncPush();
-              if (pushResult.success) {
-                setSyncResult(`Live — commit ${targetCommit} (${elapsed}s) + pushed ${pushResult.totalRows} rows`);
-              } else {
-                setSyncResult(`Live — commit ${targetCommit} (${elapsed}s) — data push failed: ${pushResult.error}`);
-              }
-            } catch {
-              setSyncResult(`Live — commit ${targetCommit} (${elapsed}s) — data push failed`);
-            }
-            setDeployProgress(null);
-            fetchSyncStatus().then(setSyncStatus).catch(() => {});
-            return;
-          }
-          // Still building/deploying
-          const mins = Math.floor(elapsed / 60);
-          const secs = elapsed % 60;
-          const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-          setDeployProgress({
-            status: elapsed < 120 ? `Building on Railway... ${timeStr}` : `Deploying... ${timeStr}`,
-            elapsed,
-            targetCommit,
-          });
-        } catch {
-          // Remote might be temporarily down during deploy swap
-          const elapsed2 = Math.round((Date.now() - startTime) / 1000);
-          setDeployProgress({ status: `Deploying... ${elapsed2}s`, elapsed: elapsed2, targetCommit });
-        }
-
-        // Timeout after 5 minutes
-        if (elapsed > 300) {
-          clearInterval(poll);
-          setDeployProgress(null);
-          setSyncResult(`Pushed ${targetCommit} — deploy may still be in progress. Check Railway dashboard.`);
-        }
-      }, 10000);
+      // F8: persist pending deploy so a refresh resumes the polling
+      writePendingDeploy({ targetCommit, startTime, filesChanged: result.filesChanged ?? 0, remoteUrl });
+      startDeployPolling(targetCommit, startTime, remoteUrl);
     } catch (e) {
-      setSyncResult(`Deploy failed: ${(e as Error).message}`);
+      setSyncResult(`❌ Deploy FAILED: ${(e as Error).message}. Click Deploy Code to retry.`);
       setSyncLoading(null);
     }
-  }, [syncStatus?.remoteUrl]);
+  }, [syncStatus?.remoteUrl, startDeployPolling]);
+
+  // F8: resume in-flight deploy on mount
+  const didResumeDeployRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (didResumeDeployRef.current) return;
+    if (!syncStatus) return;
+    didResumeDeployRef.current = true;
+    const pending = readPendingDeploy();
+    if (!pending) return;
+    const ageMs = Date.now() - pending.startTime;
+    if (ageMs > PENDING_DEPLOY_MAX_AGE_MS) { clearPendingDeploy(); return; }
+    const remoteUrl = syncStatus.remoteUrl;
+    if (!remoteUrl) { clearPendingDeploy(); return; }
+    if (pending.remoteUrl && pending.remoteUrl !== remoteUrl) {
+      setSyncResult(`⚠️ Can't resume deploy — remote config changed. Old target: ${pending.targetCommit}.`);
+      clearPendingDeploy();
+      return;
+    }
+    // Fast path: maybe Railway already finished while we were away
+    void (async () => {
+      try {
+        const remote = await fetchVersion(remoteUrl);
+        if (commitsMatch(remote.commit, pending.targetCommit)) {
+          setSyncResult(`✅ Deploy complete (resumed): commit ${pending.targetCommit}`);
+          clearPendingDeploy();
+          finalizeDeploy();
+          return;
+        }
+      } catch { /* fall through to resumed polling */ }
+      setDeployProgress({ status: `Resumed — waiting for Railway build...`, elapsed: Math.round((Date.now() - pending.startTime) / 1000), targetCommit: pending.targetCommit });
+      startDeployPolling(pending.targetCommit, pending.startTime, remoteUrl);
+    })();
+  }, [syncStatus, startDeployPolling, finalizeDeploy]);
+
+  // F6: auto-sync trigger
+  useEffect(() => {
+    if (!syncStatus || hasAutoSyncedOnMount.current) return;
+    if (syncLoading) return;
+    const direction = shouldAutoSync(syncStatus, autoSyncEnabled);
+    if (!direction) return;
+    hasAutoSyncedOnMount.current = true;
+    if (direction === 'push') void handleSyncPush({ source: 'auto-push' });
+    else void handleSyncPull({ source: 'auto-pull' });
+  }, [syncStatus, autoSyncEnabled, syncLoading, handleSyncPush, handleSyncPull]);
+
+  // F7: poll versions on mount, after every deploy completes (via finalizeDeploy), and every 30s when on settings
+  useEffect(() => {
+    refreshVersionState();
+    if (activeTab !== 'settings') return;
+    const interval = setInterval(refreshVersionState, 30000);
+    return () => clearInterval(interval);
+  }, [activeTab, refreshVersionState]);
+
+  // F9: visibility change handler — restore title when tab becomes visible
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        if (deployTitleStateRef.current !== 'idle') restoreTitle();
+      } else if (deployTitleStateRef.current !== 'idle') {
+        // Re-apply title if user navigated away during an ongoing/recently-completed deploy
+        setDeployTitle(deployTitleStateRef.current);
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      restoreTitle();
+    };
+  }, [restoreTitle, setDeployTitle]);
 
   // Load PAT status from server on mount
   useEffect(() => {
@@ -354,19 +700,156 @@ export default function SchemaPlanner() {
     } catch { /* ignore */ }
   }, []);
 
-  const ALL_VALID_TABS = [...SUB_TABS, "prototypes", "projects", "agents", "settings", "notebook"];
-  const activeTab = ALL_VALID_TABS.includes(searchParams.get("sptab") || "modules")
-    ? (searchParams.get("sptab") || "modules")
-    : "modules";
-
   const setTab = (tab: string) => {
     const params = new URLSearchParams(searchParams.toString());
     params.set("sptab", tab);
     setSearchParams(params, { replace: true });
   };
 
+  // F4: dot color reflects last sync attempt
+  const dotColor = !lastAttempt ? "#8899a6" : (lastAttempt.success ? "#4ecb71" : "#e05555");
+  const dotAria = !lastAttempt ? "Last sync status: unknown" : (lastAttempt.success ? "Last sync status: success" : "Last sync status: failed");
+
+  // F5: banner visibility
+  const bannerAttempt = lastAttempt && !lastAttempt.success && !dismissedAttempts.includes(lastAttempt.id) ? lastAttempt : null;
+
+  // F4: popover refs + outside-click + Escape handling
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const dotButtonRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!popoverOpen) return;
+    const onClick = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (popoverRef.current?.contains(t)) return;
+      if (dotButtonRef.current?.contains(t)) return;
+      setPopoverOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPopoverOpen(false); };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onClick); document.removeEventListener('keydown', onKey); };
+  }, [popoverOpen]);
+
+  const dismissBanner = useCallback(() => {
+    if (!bannerAttempt) return;
+    const next = [...dismissedAttempts.filter(id => id !== bannerAttempt.id), bannerAttempt.id];
+    writeDismissed(next);
+    setDismissedAttempts(next.slice(-DISMISSED_MAX));
+  }, [bannerAttempt, dismissedAttempts]);
+
+  const renderStatusDot = (size: number) => (
+    <span style={{ position: "relative", display: "inline-block", lineHeight: 0 }}>
+      <button
+        ref={dotButtonRef}
+        type="button"
+        onClick={() => setPopoverOpen(o => !o)}
+        aria-label={dotAria}
+        title={dotAria}
+        style={{
+          display: "inline-block",
+          width: size,
+          height: size,
+          borderRadius: "50%",
+          backgroundColor: dotColor,
+          padding: 0,
+          border: "none",
+          cursor: "pointer",
+          boxShadow: lastAttempt && !lastAttempt.success ? "0 0 0 2px rgba(224,85,85,0.25)" : undefined,
+        }}
+      />
+      {popoverOpen && (
+        <div
+          ref={popoverRef}
+          style={{
+            position: "absolute",
+            top: size + 8,
+            left: 0,
+            zIndex: 60,
+            width: 280,
+            padding: 10,
+            borderRadius: 6,
+            backgroundColor: "var(--color-surface)",
+            border: "1px solid var(--color-divider)",
+            color: "var(--color-text)",
+            fontSize: 11,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+          }}
+        >
+          {!lastAttempt ? (
+            <div style={{ color: "var(--color-text-muted)" }}>No sync attempts yet</div>
+          ) : (
+            <>
+              <div style={{ fontWeight: 600, color: lastAttempt.success ? "#4ecb71" : "#e05555", marginBottom: 4 }}>
+                {lastAttempt.success ? "✓ Last " : "✗ Last "}{lastAttempt.direction}{lastAttempt.success ? " succeeded" : " failed"}
+              </div>
+              <div style={{ color: "var(--color-text-muted)" }}>
+                {formatRelative(lastAttempt.attemptedAt)} at {formatLocalTime(lastAttempt.attemptedAt)}
+              </div>
+              <div style={{ color: "var(--color-text-subtle)", marginTop: 4 }}>Source: {humanizeSource(lastAttempt.source)}</div>
+              {lastAttempt.success && lastAttempt.rowsSynced != null && (
+                <div style={{ color: "var(--color-text-subtle)" }}>Rows synced: {lastAttempt.rowsSynced}</div>
+              )}
+              {!lastAttempt.success && lastAttempt.errorMessage && (
+                <div style={{ color: "#e05555", marginTop: 6, wordBreak: "break-word" }}>
+                  Error: {lastAttempt.errorMessage.length > 300 ? lastAttempt.errorMessage.slice(0, 300) + '…' : lastAttempt.errorMessage}
+                </div>
+              )}
+            </>
+          )}
+          <div style={{ marginTop: 8, textAlign: "right" }}>
+            <button
+              type="button"
+              onClick={() => setPopoverOpen(false)}
+              style={{ fontSize: 10, color: "var(--color-text-muted)", background: "transparent", border: "1px solid var(--color-divider)", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+
   return (
-    <div className="flex h-screen w-screen overflow-hidden" style={{ background: "var(--color-background)" }}>
+    <div className="flex flex-col h-screen w-screen overflow-hidden" style={{ background: "var(--color-background)" }}>
+      {/* F5: dismissible top failure banner */}
+      {bannerAttempt && (
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "8px 14px",
+            backgroundColor: "rgba(224,85,85,0.12)",
+            borderBottom: "1px solid rgba(224,85,85,0.4)",
+            color: "#e05555",
+            fontSize: 12,
+          }}
+        >
+          <span>❌</span>
+          <span style={{ flex: 1 }}>
+            Last {bannerAttempt.direction} FAILED at {formatLocalTime(bannerAttempt.attemptedAt)}: {(bannerAttempt.errorMessage || 'unknown error').slice(0, 200)}
+          </span>
+          {bannerAttempt.direction === 'push' && (
+            <button
+              type="button"
+              onClick={() => { setTab('settings'); void handleLoadDiff(); }}
+              style={{ fontSize: 11, padding: "4px 10px", borderRadius: 4, border: "1px solid rgba(224,85,85,0.5)", backgroundColor: "rgba(224,85,85,0.08)", color: "#e05555", cursor: "pointer" }}
+            >
+              View Differences
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={dismissBanner}
+            style={{ fontSize: 11, padding: "4px 10px", borderRadius: 4, border: "1px solid rgba(224,85,85,0.5)", backgroundColor: "transparent", color: "#e05555", cursor: "pointer" }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      <div className="flex flex-1 overflow-hidden" style={{ minHeight: 0 }}>
       {/* Sidebar */}
       <aside
         className="flex flex-col shrink-0 border-r overflow-hidden transition-all duration-200"
@@ -376,15 +859,24 @@ export default function SchemaPlanner() {
           borderColor: "var(--color-divider)",
         }}
       >
-        {/* App title (arrow moved into first category row) */}
-        {sidebarOpen && (
+        {/* App title with F4 status dot */}
+        {sidebarOpen ? (
           <div
             className="flex items-center px-3 py-2 border-b shrink-0"
-            style={{ borderColor: "var(--color-divider)" }}
+            style={{ borderColor: "var(--color-divider)", gap: 8 }}
           >
             <span className="text-sm font-bold truncate" style={{ color: "var(--color-text)" }}>
               Schema Planner
             </span>
+            {renderStatusDot(8)}
+          </div>
+        ) : (
+          <div
+            className="flex items-center justify-center py-2 border-b shrink-0"
+            style={{ borderColor: "var(--color-divider)" }}
+            title="Last sync status"
+          >
+            {renderStatusDot(6)}
           </div>
         )}
 
@@ -872,6 +1364,56 @@ export default function SchemaPlanner() {
                 Push local data to the remote web app, or pull remote changes back to your local database.
               </p>
 
+              {/* F11: Auto-sync toggle */}
+              <label className="flex items-start gap-2 mb-2 cursor-pointer" style={{ color: "var(--color-text)" }}>
+                <input
+                  type="checkbox"
+                  checked={autoSyncEnabled}
+                  onChange={(e) => setAutoSyncEnabled(e.target.checked)}
+                  style={{ marginTop: 2 }}
+                />
+                <span style={{ fontSize: 12 }}>
+                  Auto-sync when only one side has changes
+                  <span className="block" style={{ fontSize: 10, color: "var(--color-text-subtle)", marginTop: 2 }}>
+                    Automatically push or pull when it&rsquo;s unambiguous which direction to go. Disable if you prefer manual control.
+                  </span>
+                </span>
+              </label>
+
+              {/* F12: Tab-title notifications toggle */}
+              <label className="flex items-start gap-2 mb-4 cursor-pointer" style={{ color: "var(--color-text)" }}>
+                <input
+                  type="checkbox"
+                  checked={tabTitleNotifications}
+                  onChange={(e) => setTabTitleNotifications(e.target.checked)}
+                  style={{ marginTop: 2 }}
+                />
+                <span style={{ fontSize: 12 }}>
+                  Notify in tab title during deploys
+                  <span className="block" style={{ fontSize: 10, color: "var(--color-text-subtle)", marginTop: 2 }}>
+                    Changes this browser tab&rsquo;s title when a deploy starts or finishes so you can spot it from another tab.
+                  </span>
+                </span>
+              </label>
+
+              {/* F7: Remote version badge */}
+              {(() => {
+                if (!versionState) {
+                  return <p className="text-xs mb-3" style={{ color: "var(--color-text-subtle)" }}>Checking remote code version...</p>;
+                }
+                if (!versionState.local || !versionState.remote) {
+                  return <p className="text-xs mb-3" style={{ color: "var(--color-text-subtle)" }}>Can&rsquo;t verify remote code version.</p>;
+                }
+                if (versionState.match) {
+                  return <p className="text-xs mb-3" style={{ color: "#4ecb71" }}>✅ Remote code is up to date (commit {versionState.local})</p>;
+                }
+                return (
+                  <p className="text-xs mb-3" style={{ color: "#f2b661" }}>
+                    ⚠️ Remote is behind — local at {versionState.local} · remote at {versionState.remote}. Deploy Code to sync.
+                  </p>
+                );
+              })()}
+
               {!syncStatus ? (
                 <p className="text-xs" style={{ color: "var(--color-text-subtle)" }}>Loading sync status...</p>
               ) : !syncStatus.configured ? (
@@ -1095,6 +1637,9 @@ export default function SchemaPlanner() {
           />
         )}
       </main>
+      </div>
+      {/* F6: auto-sync toast (top-right, fixed) */}
+      <AutoSyncToast message={toastMessage} toastKey={toastKey} />
     </div>
   );
 }
