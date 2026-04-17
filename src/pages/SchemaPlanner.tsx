@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import AgentsTab from "../components/schema-planner/AgentsTab";
+import NotebookTab from "../components/schema-planner/NotebookTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
 import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, type SyncStatus, type AppMode } from "../lib/api";
 
@@ -60,6 +61,7 @@ const COMMAND_GROUPS = [
 ];
 
 const TAB_ICONS: Record<string, string> = {
+  notebook: "📝",
   projects: "📁",
   modules: "🌐",
   features: "⚡",
@@ -80,11 +82,13 @@ const TAB_ICONS: Record<string, string> = {
 };
 
 const TAB_LABELS: Record<string, string> = {
+  notebook: "Notes",
   prototypes: "Prototypes",
   all_test_cases: "Test Cases",
 };
 
 const TAB_GROUPS = [
+  { label: "Notes", tabs: ["notebook"] },
   { label: "Projects", tabs: ["projects"] },
   { label: "Core", tabs: ["modules", "features", "concepts", "research", "all_test_cases"] },
   { label: "Data", tabs: ["data_tables", "data_fields", "module_use_fields"] },
@@ -305,7 +309,7 @@ export default function SchemaPlanner() {
     } catch { /* ignore */ }
   }, []);
 
-  const ALL_VALID_TABS = [...SUB_TABS, "prototypes", "projects", "agents", "settings"];
+  const ALL_VALID_TABS = [...SUB_TABS, "prototypes", "projects", "agents", "settings", "notebook"];
   const activeTab = ALL_VALID_TABS.includes(searchParams.get("sptab") || "modules")
     ? (searchParams.get("sptab") || "modules")
     : "modules";
@@ -538,8 +542,10 @@ export default function SchemaPlanner() {
       )}
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto p-4" style={{ minWidth: 0 }}>
-        {activeTab === "agents" ? (
+      <main className={`flex-1 overflow-auto ${activeTab === "notebook" ? "p-0" : "p-4"}`} style={{ minWidth: 0 }}>
+        {activeTab === "notebook" ? (
+          <NotebookTab />
+        ) : activeTab === "agents" ? (
           <AgentsTab />
         ) : activeTab === "settings" ? (
           <div style={{ maxWidth: 600 }}>

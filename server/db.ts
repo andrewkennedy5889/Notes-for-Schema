@@ -389,6 +389,15 @@ function initSchema(db: Database.Database) {
       UNIQUE(entity_type, column_key)
     );
 
+    CREATE TABLE IF NOT EXISTS _splan_notebook (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      title           TEXT NOT NULL DEFAULT 'Untitled',
+      content_html    TEXT NOT NULL DEFAULT '',
+      pinned          INTEGER NOT NULL DEFAULT 0,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS _splan_sync_meta (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
       sync_direction  TEXT NOT NULL,

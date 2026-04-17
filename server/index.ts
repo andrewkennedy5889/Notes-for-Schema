@@ -1420,6 +1420,47 @@ app.delete('/api/agents/schedules/:agentId', (req: Request, res: Response) => {
   }
 });
 
+// ─── Notebook CRUD ──────────────────────────────────────────────────────────
+
+app.get('/api/notebook', (_req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db.prepare('SELECT * FROM _splan_notebook ORDER BY pinned DESC, updated_at DESC').all();
+  return void res.json(rows);
+});
+
+app.post('/api/notebook', (req: Request, res: Response) => {
+  const db = getDb();
+  const { title, content_html } = req.body as { title?: string; content_html?: string };
+  const result = db.prepare(
+    'INSERT INTO _splan_notebook (title, content_html) VALUES (?, ?)'
+  ).run(title || 'Untitled', content_html || '');
+  const row = db.prepare('SELECT * FROM _splan_notebook WHERE id = ?').get(result.lastInsertRowid);
+  return void res.json(row);
+});
+
+app.put('/api/notebook/:id', (req: Request, res: Response) => {
+  const db = getDb();
+  const id = parseInt(req.params.id, 10);
+  const { title, content_html, pinned } = req.body as { title?: string; content_html?: string; pinned?: number };
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (title !== undefined) { sets.push('title = ?'); vals.push(title); }
+  if (content_html !== undefined) { sets.push('content_html = ?'); vals.push(content_html); }
+  if (pinned !== undefined) { sets.push('pinned = ?'); vals.push(pinned); }
+  if (sets.length === 0) return void res.status(400).json({ error: 'Nothing to update' });
+  sets.push("updated_at = datetime('now')");
+  vals.push(id);
+  db.prepare(`UPDATE _splan_notebook SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  const row = db.prepare('SELECT * FROM _splan_notebook WHERE id = ?').get(id);
+  return void res.json(row);
+});
+
+app.delete('/api/notebook/:id', (req: Request, res: Response) => {
+  const db = getDb();
+  db.prepare('DELETE FROM _splan_notebook WHERE id = ?').run(parseInt(req.params.id, 10));
+  return void res.json({ success: true });
+});
+
 // ─── Sync endpoints (dev-only) ──────────────────────────────────────────────
 
 const SYNC_REMOTE_URL = process.env.SYNC_REMOTE_URL || '';
