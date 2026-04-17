@@ -865,7 +865,22 @@ export default function SchemaPlanner() {
             className="flex items-center px-3 py-2 border-b shrink-0"
             style={{ borderColor: "var(--color-divider)", gap: 8 }}
           >
-            <span className="text-sm font-bold truncate" style={{ color: "var(--color-text)" }}>
+            <span
+              className="text-sm font-bold truncate"
+              style={{ color: "var(--color-text)" }}
+              title={
+                window.location.hostname === "localhost" ||
+                window.location.hostname === "127.0.0.1"
+                  ? "Running locally (dev)"
+                  : "Running on Railway (production)"
+              }
+            >
+              <span aria-hidden="true" className="mr-1">
+                {window.location.hostname === "localhost" ||
+                window.location.hostname === "127.0.0.1"
+                  ? "💻"
+                  : "📱"}
+              </span>
               Schema Planner
             </span>
             {renderStatusDot(8)}

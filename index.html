@@ -9,6 +9,23 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/favicon.png" />
 
+    <!-- Environment-aware favicon: computer for localhost, phone for Railway/remote -->
+    <script>
+      (function () {
+        var host = location.hostname;
+        var isLocal = host === 'localhost' || host === '127.0.0.1';
+        var emoji = isLocal ? '\uD83D\uDCBB' : '\uD83D\uDCF1';
+        var svg =
+          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+          '<text y="54" font-size="56">' + emoji + '</text></svg>';
+        var href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+        var icon = document.querySelector("link[rel='icon']");
+        if (icon) icon.href = href;
+        var apple = document.querySelector("link[rel='apple-touch-icon']");
+        if (apple) apple.href = href;
+      })();
+    </script>
+
     <!-- PWA / Safari standalone -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
