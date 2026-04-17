@@ -12,6 +12,8 @@ import { getDb } from './db.js';
 import { parseRow, prepareRow, camelToSnake } from './utils.js';
 import { authRouter, authMiddleware } from './auth.js';
 import { getAppMode, requireLocal } from './app-mode.js';
+import { getScheduledAgent, SCHEDULED_AGENTS } from './scheduled-agents/registry.js';
+import { schemaFingerprint } from './schema-fingerprint.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1595,6 +1597,311 @@ app.delete('/api/agents/schedules/:agentId', (req: Request, res: Response) => {
   }
 });
 
+// ─── Scheduled-agent work broker (Phase 4) ──────────────────────────────────
+// Cron-fired Claude hits /inputs to receive preflight + work payload, then
+// /results to post findings. Railway is a pure data broker — no LLM calls.
+
+function requireScheduledToken(req: Request, res: Response, next: NextFunction): void {
+  const expected = process.env.SCHEDULED_AGENT_TOKEN;
+  if (!expected) {
+    console.error('[scheduled-agents] SCHEDULED_AGENT_TOKEN not set — refusing request');
+    return void res.status(503).json({ error: 'scheduled_agent_token_not_configured' });
+  }
+  const header = req.header('authorization') ?? '';
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  if (!match || match[1].trim() !== expected) {
+    return void res.status(401).json({ error: 'unauthorized' });
+  }
+  next();
+}
+
+const scheduledRateState = new Map<string, number>();
+const SCHEDULED_RATE_WINDOW_MS = 60_000;
+function rateLimitScheduled(agentId: string, endpoint: 'inputs' | 'results'): boolean {
+  const key = `${agentId}:${endpoint}`;
+  const now = Date.now();
+  const last = scheduledRateState.get(key) ?? 0;
+  if (now - last < SCHEDULED_RATE_WINDOW_MS) return false;
+  scheduledRateState.set(key, now);
+  return true;
+}
+
+function loadSchedule(agentId: string): Record<string, unknown> | null {
+  const schedules = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
+  return schedules[agentId] ?? null;
+}
+
+type RunLogCore = {
+  runId: string;
+  agentId: string;
+  scheduledAt: string;
+  firedAt: string;
+};
+
+function logSkippedRun(params: RunLogCore & {
+  skippedReason: string;
+  expectedSchemaHash?: string | null;
+  actualSchemaHash?: string | null;
+  promptChars?: number;
+}): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO _splan_scheduled_runs
+       (run_id, agent_id, scheduled_at, fired_at, completed_at, status,
+        skipped_reason, expected_schema_hash, actual_schema_hash,
+        prompt_chars, estimated_tokens)
+     VALUES (?, ?, ?, ?, ?, 'skipped', ?, ?, ?, ?, ?)`
+  ).run(
+    params.runId,
+    params.agentId,
+    params.scheduledAt,
+    params.firedAt,
+    params.firedAt,
+    params.skippedReason,
+    params.expectedSchemaHash ?? null,
+    params.actualSchemaHash ?? null,
+    params.promptChars ?? null,
+    params.promptChars != null ? Math.floor(params.promptChars / 4) : null
+  );
+}
+
+function logPendingRun(params: RunLogCore & {
+  expectedSchemaHash: string | null;
+  actualSchemaHash: string;
+  promptChars: number;
+  inputChars: number;
+}): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO _splan_scheduled_runs
+       (run_id, agent_id, scheduled_at, fired_at, status,
+        expected_schema_hash, actual_schema_hash,
+        prompt_chars, input_chars)
+     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`
+  ).run(
+    params.runId,
+    params.agentId,
+    params.scheduledAt,
+    params.firedAt,
+    params.expectedSchemaHash,
+    params.actualSchemaHash,
+    params.promptChars,
+    params.inputChars
+  );
+}
+
+function loadPendingRun(runId: string): {
+  runId: string;
+  agentId: string;
+  firedAt: string;
+  promptChars: number | null;
+  inputChars: number | null;
+} | null {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT run_id, agent_id, fired_at, status, prompt_chars, input_chars
+     FROM _splan_scheduled_runs WHERE run_id = ?`
+  ).get(runId) as { run_id: string; agent_id: string; fired_at: string; status: string; prompt_chars: number | null; input_chars: number | null } | undefined;
+  if (!row || row.status !== 'pending') return null;
+  return {
+    runId: row.run_id,
+    agentId: row.agent_id,
+    firedAt: row.fired_at,
+    promptChars: row.prompt_chars,
+    inputChars: row.input_chars,
+  };
+}
+
+function logCompletedRun(params: {
+  runId: string;
+  status: 'success' | 'failed';
+  skippedReason?: string;
+  resultJson?: unknown;
+  resultChars: number;
+  toolCalls?: unknown;
+}): void {
+  const db = getDb();
+  const existing = db.prepare(
+    'SELECT fired_at, prompt_chars, input_chars FROM _splan_scheduled_runs WHERE run_id = ?'
+  ).get(params.runId) as { fired_at: string; prompt_chars: number | null; input_chars: number | null } | undefined;
+
+  const completedAt = new Date().toISOString();
+  const durationMs = existing ? Math.max(0, Date.now() - Date.parse(existing.fired_at)) : null;
+  const promptChars = existing?.prompt_chars ?? 0;
+  const inputChars = existing?.input_chars ?? 0;
+  const estimatedTokens = Math.floor((promptChars + inputChars + params.resultChars) / 4);
+
+  db.prepare(
+    `UPDATE _splan_scheduled_runs
+     SET status = ?, completed_at = ?, duration_ms = ?,
+         result_chars = ?, estimated_tokens = ?,
+         result_json = ?, tool_calls_json = ?, skipped_reason = ?
+     WHERE run_id = ?`
+  ).run(
+    params.status,
+    completedAt,
+    durationMs,
+    params.resultChars,
+    estimatedTokens,
+    params.resultJson !== undefined ? JSON.stringify(params.resultJson) : null,
+    params.toolCalls !== undefined ? JSON.stringify(params.toolCalls) : null,
+    params.skippedReason ?? null,
+    params.runId
+  );
+}
+
+// GET /api/agents/work/:agentId/inputs — preflight + work payload
+app.get('/api/agents/work/:agentId/inputs', requireScheduledToken, (req: Request, res: Response) => {
+  const { agentId } = req.params;
+  if (!rateLimitScheduled(agentId, 'inputs')) {
+    return void res.status(429).json({ error: 'rate_limited' });
+  }
+
+  const runId = generateRunId();
+  const firedAt = new Date().toISOString();
+  const schedule = loadSchedule(agentId);
+  const scheduledAt = (schedule?.scheduledAt as string | undefined) ?? firedAt;
+  const baseRun = { runId, agentId, scheduledAt, firedAt };
+  const promptSnapshot = (schedule?.promptSnapshot as string | undefined) ?? '';
+
+  if (!schedule || schedule.enabled === false) {
+    logSkippedRun({ ...baseRun, skippedReason: 'schedule_disabled', promptChars: promptSnapshot.length });
+    return void res.json({ runId, skip: 'schedule_disabled' });
+  }
+
+  const expectedHash = (schedule.expectedSchemaFingerprint as string | undefined) ?? null;
+  const actualHash = computeSchemaFingerprint();
+  if (expectedHash && expectedHash !== actualHash) {
+    logSkippedRun({
+      ...baseRun,
+      skippedReason: 'schema_stale',
+      expectedSchemaHash: expectedHash,
+      actualSchemaHash: actualHash,
+      promptChars: promptSnapshot.length,
+    });
+    return void res.json({ runId, skip: 'schema_stale', actualHash, expectedHash });
+  }
+
+  const def = getScheduledAgent(agentId);
+  if (!def) {
+    logSkippedRun({ ...baseRun, skippedReason: 'no_handler', promptChars: promptSnapshot.length });
+    return void res.json({ runId, skip: 'no_handler' });
+  }
+
+  let work: unknown;
+  try {
+    work = def.inputsBuilder({ db: getDb(), params: (schedule.paramDefaults as Record<string, unknown>) ?? {} });
+  } catch (e) {
+    logSkippedRun({
+      ...baseRun,
+      skippedReason: 'inputs_builder_threw',
+      expectedSchemaHash: expectedHash,
+      actualSchemaHash: actualHash,
+      promptChars: promptSnapshot.length,
+    });
+    return void res.status(500).json({ runId, error: 'inputs_builder_threw', detail: (e as Error).message });
+  }
+
+  const workJson = JSON.stringify(work);
+  logPendingRun({
+    ...baseRun,
+    expectedSchemaHash: expectedHash,
+    actualSchemaHash: actualHash,
+    promptChars: promptSnapshot.length,
+    inputChars: workJson.length,
+  });
+
+  return void res.json({ runId, work, schemaHash: actualHash });
+});
+
+// POST /api/agents/work/:agentId/results — validate + write findings
+app.post('/api/agents/work/:agentId/results', requireScheduledToken, (req: Request, res: Response) => {
+  const { agentId } = req.params;
+  if (!rateLimitScheduled(agentId, 'results')) {
+    return void res.status(429).json({ error: 'rate_limited' });
+  }
+
+  const body = (req.body ?? {}) as { runId?: string; findings?: unknown[]; error?: string; toolCalls?: unknown };
+  const runId = body.runId;
+  if (!runId) return void res.status(400).json({ error: 'runId_required' });
+
+  const run = loadPendingRun(runId);
+  if (!run || run.agentId !== agentId) {
+    return void res.status(404).json({ error: 'unknown_run' });
+  }
+
+  const resultChars = JSON.stringify(body).length;
+
+  if (body.error) {
+    logCompletedRun({
+      runId,
+      status: 'failed',
+      skippedReason: 'claude_reported_error',
+      resultJson: { error: body.error },
+      resultChars,
+      toolCalls: body.toolCalls,
+    });
+    return void res.json({ ok: true, recorded: 'failed' });
+  }
+
+  const def = getScheduledAgent(agentId);
+  if (!def) {
+    logCompletedRun({
+      runId,
+      status: 'failed',
+      skippedReason: 'no_handler',
+      resultJson: { error: 'no_handler' },
+      resultChars,
+      toolCalls: body.toolCalls,
+    });
+    return void res.status(400).json({ ok: false, reason: 'no_handler' });
+  }
+
+  const validation = def.resultsValidator({ findings: body.findings });
+  if (!validation.ok) {
+    logCompletedRun({
+      runId,
+      status: 'failed',
+      skippedReason: 'invalid_result_shape',
+      resultJson: { error: validation.error, received: body },
+      resultChars,
+      toolCalls: body.toolCalls,
+    });
+    return void res.status(400).json({ ok: false, reason: 'invalid_result_shape', detail: validation.error });
+  }
+
+  const schedule = loadSchedule(agentId);
+  try {
+    const summary = def.resultsWriter({
+      db: getDb(),
+      runId,
+      findings: body.findings as unknown[],
+      params: (schedule?.paramDefaults as Record<string, unknown>) ?? {},
+    });
+    logCompletedRun({
+      runId,
+      status: 'success',
+      resultJson: summary,
+      resultChars,
+      toolCalls: body.toolCalls,
+    });
+    return void res.json({ ran: true, runId, ...(summary as Record<string, unknown>) });
+  } catch (e) {
+    logCompletedRun({
+      runId,
+      status: 'failed',
+      skippedReason: 'writer_threw',
+      resultJson: { error: (e as Error).message },
+      resultChars,
+      toolCalls: body.toolCalls,
+    });
+    return void res.status(500).json({ ok: false, reason: 'writer_threw', error: (e as Error).message });
+  }
+});
+
+// Expose the registry keys so other routes (prompt inspector, etc.) can enumerate.
+void SCHEDULED_AGENTS;
+
 // ─── Notebook CRUD ──────────────────────────────────────────────────────────
 
 app.get('/api/notebook', (_req: Request, res: Response) => {
@@ -2440,7 +2747,7 @@ function getSchemaTables(): string[] {
 }
 
 function computeSchemaFingerprint(): string {
-  return crypto.createHash('sha256').update(getSchemaTables().join('\n')).digest('hex');
+  return schemaFingerprint(getDb());
 }
 
 // ─── GET /api/sync-status — changes since last sync ─────────────────────────
