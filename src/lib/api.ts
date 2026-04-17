@@ -447,6 +447,19 @@ export async function fetchLastDeploy(): Promise<{ deploy: LastDeploy | null; re
   return res.json();
 }
 
+// Local git state — populated on local instance, 404 on hosted
+export interface LocalGitStatus {
+  commitsAhead: number;
+  dirty: boolean;
+  headCommit: string | null;
+}
+
+export async function fetchLocalGitStatus(): Promise<LocalGitStatus | null> {
+  const res = await fetch(`${BASE}/sync/local-git-status`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
 // ─── Sync diff ───────────────────────────────────────────────────────────────
 
 export interface SyncDiffChange {

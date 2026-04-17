@@ -2204,6 +2204,31 @@ app.get('/api/sync/last-attempt', (_req: Request, res: Response) => {
   });
 });
 
+// Local git state — how many commits ahead of origin/main, and whether the working tree is dirty.
+// Drives the "N commits ahead — will push on next Deploy" indicator. Local-only; returns zeros on hosted.
+app.get('/api/sync/local-git-status', requireLocal, (_req: Request, res: Response) => {
+  const PROJECT_ROOT = path.join(__dirname, '..');
+  const opts = { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'ignore'] as const };
+  const execSync = require('child_process').execSync as (cmd: string, o: typeof opts) => Buffer;
+
+  let commitsAhead = 0;
+  let dirty = false;
+  let headCommit: string | null = null;
+  try {
+    const ahead = execSync('git log origin/main..HEAD --oneline', opts).toString().trim();
+    commitsAhead = ahead ? ahead.split('\n').length : 0;
+  } catch { /* no upstream or not a git repo */ }
+  try {
+    const status = execSync('git status --porcelain', opts).toString().trim();
+    dirty = status.length > 0;
+  } catch { /* ignore */ }
+  try {
+    headCommit = execSync('git rev-parse --short HEAD', opts).toString().trim() || null;
+  } catch { /* ignore */ }
+
+  return void res.json({ commitsAhead, dirty, headCommit });
+});
+
 // Most recent deploy attempt (success, timeout, or failure) + repo URL for linking
 app.get('/api/sync/last-deploy', (_req: Request, res: Response) => {
   const db = getDb();
