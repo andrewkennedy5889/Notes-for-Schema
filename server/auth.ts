@@ -57,6 +57,10 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   // Allow auth routes through
   if (req.path.startsWith('/auth/')) return next();
 
+  // Allow /api/version through unauthenticated — it only returns a short git SHA
+  // and is polled cross-origin by the local instance to detect when a deploy lands.
+  if (req.path === '/api/version') return next();
+
   const token = getCookie(req, COOKIE_NAME);
   const expected = makeToken(AUTH_PASSWORD);
 
