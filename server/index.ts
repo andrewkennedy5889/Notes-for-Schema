@@ -2293,7 +2293,16 @@ app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) =>
         }
         exec(pushCmd, execOpts, (pushErr) => {
           if (pushErr) return void res.status(500).json({ error: `git push failed: ${pushErr.message}` });
-          return void res.json({ success: true, status: 'pushed', message: 'Pushed unpushed commits' });
+          // Capture HEAD so the client has a commit hash to poll for
+          exec('git rev-parse --short HEAD', execOpts, (_hashErr, hashOut) => {
+            return void res.json({
+              success: true,
+              status: 'pushed',
+              message: 'Pushed unpushed commits',
+              commitHash: hashOut?.trim() || null,
+              filesChanged: logOut.trim().split('\n').length,
+            });
+          });
         });
       });
       return;
