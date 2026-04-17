@@ -1823,7 +1823,7 @@ app.post('/api/sync/push', async (req: Request, res: Response) => {
 
   try {
     const db = getDb();
-    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta']);
+    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta', '_splan_scheduled_runs']);
     const tableRows = db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_splan_%' ORDER BY name"
     ).all() as Array<{ name: string }>;
@@ -1946,7 +1946,7 @@ app.post('/api/sync/pull', async (req: Request, res: Response) => {
     }
 
     const db = getDb();
-    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta']);
+    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta', '_splan_scheduled_runs']);
     const ENTITY_TABLE_MAP: Record<string, string> = {
       modules: '_splan_modules', features: '_splan_features', concepts: '_splan_concepts',
       data_tables: '_splan_data_tables', data_fields: '_splan_data_fields',
@@ -2067,7 +2067,7 @@ app.get('/api/sync/diff', async (_req: Request, res: Response) => {
     const remoteIdx = buildIndex(remoteStatus.changesSinceSync);
 
     // 4. Per-table diff
-    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta', '_splan_change_log']);
+    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta', '_splan_change_log', '_splan_scheduled_runs']);
     const IGNORE_FIELDS = new Set(['updated_at', 'created_at']);
     const tablesOut: Array<Record<string, unknown>> = [];
 
@@ -2398,7 +2398,7 @@ app.get('/api/version', (_req: Request, res: Response) => {
 // ─── GET /api/db-export — bulk export all tables ────────────────────────────
 app.get('/api/db-export', (_req: Request, res: Response) => {
   const db = getDb();
-  const SKIP_TABLES = new Set(['_splan_all_tests', '_splan_grouping_presets']);
+  const SKIP_TABLES = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_scheduled_runs']);
 
   const tableRows = db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_splan_%' ORDER BY name"
@@ -2471,7 +2471,7 @@ app.post('/api/db-import', express.json({ limit: '50mb' }), (req: Request, res: 
   const db = getDb();
 
   // Tables/views to skip
-  const SKIP_TABLES = new Set(['_splan_all_tests', '_splan_grouping_presets']);
+  const SKIP_TABLES = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_scheduled_runs']);
 
   const imported: Record<string, number> = {};
 

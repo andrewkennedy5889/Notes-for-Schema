@@ -430,6 +430,28 @@ function initSchema(db: Database.Database) {
       updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(entity_type, entity_id, note_key)
     );
+
+    CREATE TABLE IF NOT EXISTS _splan_scheduled_runs (
+      id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id                 TEXT NOT NULL UNIQUE,
+      agent_id               TEXT NOT NULL,
+      scheduled_at           TEXT NOT NULL,
+      fired_at               TEXT NOT NULL,
+      completed_at           TEXT,
+      status                 TEXT NOT NULL,
+      skipped_reason         TEXT,
+      expected_schema_hash   TEXT,
+      actual_schema_hash     TEXT,
+      result_json            TEXT,
+      duration_ms            INTEGER,
+      prompt_chars           INTEGER,
+      input_chars            INTEGER,
+      result_chars           INTEGER,
+      estimated_tokens       INTEGER,
+      tool_calls_json        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_scheduled_runs_agent
+      ON _splan_scheduled_runs (agent_id, fired_at DESC);
   `);
 
   // Migrations: add columns to existing tables (safe to re-run — ignores if column exists)
