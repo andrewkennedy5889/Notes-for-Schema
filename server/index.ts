@@ -1621,6 +1621,15 @@ app.post('/api/sync/pull', async (_req: Request, res: Response) => {
     db.prepare('INSERT INTO _splan_sync_meta (sync_direction, remote_url, rows_synced) VALUES (?, ?, ?)')
       .run('pull', auth.baseUrl, totalRows);
 
+    // Tell the remote that its changes were consumed (so remote sync-status resets)
+    try {
+      await fetch(`${auth.baseUrl}/api/db-import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: auth.cookie, 'X-Sync-Source': 'local-pull-ack' },
+        body: JSON.stringify({ tables: {} }),
+      });
+    } catch { /* non-critical — remote badge may stay yellow until next push */ }
+
     return void res.json({ success: true, totalRows });
   } catch (e: unknown) {
     return void res.status(500).json({ error: (e as Error).message });
