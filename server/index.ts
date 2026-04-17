@@ -1469,6 +1469,39 @@ app.delete('/api/notebook/:id', (req: Request, res: Response) => {
 
 // ─── Sync endpoints (dev-only) ──────────────────────────────────────────────
 
+// Auto-backup: copy DB before any sync operation (keeps last 10)
+function backupDatabase() {
+  const DB_FILE = process.env.DB_PATH || path.join(__dirname, '..', 'schema-planner.db');
+  const backupDir = path.join(path.dirname(DB_FILE), 'backups');
+  if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const backupPath = path.join(backupDir, `schema-planner-${timestamp}.db`);
+
+  try {
+    // Use SQLite backup API via better-sqlite3 for a safe copy
+    const db = getDb();
+    db.backup(backupPath).then(() => {
+      // Prune old backups, keep last 10
+      const files = fs.readdirSync(backupDir)
+        .filter(f => f.startsWith('schema-planner-') && f.endsWith('.db'))
+        .sort()
+        .reverse();
+      for (const old of files.slice(10)) {
+        try { fs.unlinkSync(path.join(backupDir, old)); } catch { /* ignore */ }
+      }
+      console.log(`Backup saved: ${backupPath}`);
+    }).catch((err: Error) => {
+      console.error('Backup failed:', err.message);
+      // Fallback: simple file copy
+      try { fs.copyFileSync(DB_FILE, backupPath); } catch { /* ignore */ }
+    });
+  } catch {
+    // Fallback: simple file copy
+    try { fs.copyFileSync(DB_FILE, backupPath); } catch { /* ignore */ }
+  }
+}
+
 const SYNC_REMOTE_URL = process.env.SYNC_REMOTE_URL || '';
 const SYNC_REMOTE_PASSWORD = process.env.SYNC_REMOTE_PASSWORD || '';
 
@@ -1523,6 +1556,7 @@ app.post('/api/sync/push', async (_req: Request, res: Response) => {
   if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
   const auth = getSyncAuth();
   if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
+  backupDatabase();
 
   try {
     const db = getDb();
@@ -1568,6 +1602,7 @@ app.post('/api/sync/pull', async (_req: Request, res: Response) => {
   if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
   const auth = getSyncAuth();
   if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
+  backupDatabase();
 
   try {
     const exportRes = await fetch(`${auth.baseUrl}/api/db-export`, { headers: { Cookie: auth.cookie } });
@@ -1585,7 +1620,7 @@ app.post('/api/sync/pull', async (_req: Request, res: Response) => {
     const remoteTotal = (tables['_splan_modules']?.length || 0) + (tables['_splan_features']?.length || 0)
       + (tables['_splan_data_tables']?.length || 0) + (tables['_splan_concepts']?.length || 0);
 
-    if (localTotal > 20 && remoteTotal === 0) {
+    if (localTotal > 100 && remoteTotal === 0) {
       return void res.status(400).json({
         error: `Safety check: local has ${localTotal} rows in core tables but remote has 0. The remote may have been wiped by a redeploy. Push your local data first instead.`,
       });

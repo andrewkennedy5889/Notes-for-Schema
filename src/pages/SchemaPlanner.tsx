@@ -258,8 +258,20 @@ export default function SchemaPlanner() {
           const remote = await fetchVersion(remoteUrl);
           if (remote.commit === targetCommit) {
             clearInterval(poll);
+            setDeployProgress({ status: `Live — pushing data...`, elapsed, targetCommit });
+            // Auto-push data after successful deploy
+            try {
+              const pushResult = await syncPush();
+              if (pushResult.success) {
+                setSyncResult(`Live — commit ${targetCommit} (${elapsed}s) + pushed ${pushResult.totalRows} rows`);
+              } else {
+                setSyncResult(`Live — commit ${targetCommit} (${elapsed}s) — data push failed: ${pushResult.error}`);
+              }
+            } catch {
+              setSyncResult(`Live — commit ${targetCommit} (${elapsed}s) — data push failed`);
+            }
             setDeployProgress(null);
-            setSyncResult(`Live — commit ${targetCommit} (${elapsed}s)`);
+            fetchSyncStatus().then(setSyncStatus).catch(() => {});
             return;
           }
           // Still building/deploying

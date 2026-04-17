@@ -8,6 +8,7 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+backups/
 
 # Uploaded images (local data)
 Image Storage/
