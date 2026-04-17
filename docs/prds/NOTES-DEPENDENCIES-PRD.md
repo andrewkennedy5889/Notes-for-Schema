@@ -202,6 +202,8 @@ Findings from the Phase A audit run on 2026-04-17:
 
 - **BUG-A5** *(verified working)*: Formatting-only saves DO trigger a change-log entry. The PUT `/api/schema-planner/notes` `changed` computation compares content AND fmt AND collapsed AND tables separately, so any of the four changing triggers a log write. **No fix needed.**
 
+- **BUG-A6** *(not a bug — gotcha to document)*: Custom `columnKey` values MUST start with `uc_`. The UI `addColumn` helper auto-prefixes (SchemaPlannerTab.tsx:889); `mergeColumnDefs` (line 371) only strips keys starting with `uc_` before re-inserting. An API-created column without the prefix is double-appended on every `reloadColumnDefs`, producing duplicate headers. **Phase B implication**: the auto-paired deps column_def in §5.4 MUST also use the `uc_` prefix — key pattern is `{uc_notesKey}_deps` (e.g., `uc_design_notes_deps`). Consider adding a server-side 400 in `POST /api/column-defs` when `columnType ∈ {'notes','dependencies'}` and `!columnKey.startsWith('uc_')`.
+
 ### 4.3 Verification run-log (2026-04-17)
 
 | Check | Result |
@@ -212,19 +214,23 @@ Findings from the Phase A audit run on 2026-04-17:
 | Sample row preview | ✅ Existing concept notes content preserved verbatim |
 | Client build warnings | None material (only pre-existing 500kB chunk-size notice) |
 
-### 4.4 Browser tests not yet run
+### 4.4 Browser test results (2026-04-17 session 2 — all pass)
 
-The following tests in §4.1 **require manual browser verification** (the audit session did code-level verification + DB spot-check only):
+All §4.1 tests executed against local dev server via chrome-devtools MCP + direct SQLite checks.
 
-- A1 test 2-5: click through a Concept's Notes, edit, save, reload, confirm persistence.
-- A2 all: add a custom Notes column to Modules, verify nested feature dropdown still expands correctly.
-- A3 all: add a custom Notes column to Features, confirm platform-notes untouched.
-- A4 all: add Notes columns to Data Tables + Data Fields.
-- A5: delete an entity, verify DB cascade.
-- A6: add custom Notes column, write content, delete column, verify DB cascade.
-- A7: make several rapid edits, verify ONE change-log entry per save + single sync-diff entry.
+| Test | Result | Evidence |
+|---|---|---|
+| A1 Concepts regression | ✓ | Overlay opened with backfilled content; ref `(c:9:Scope Creep)` resolved to `(💡 Scope Creep)`; edit persisted after reload; exactly 1 change_log entry with `field_changed='notes', reasoning='Notes edit: notes'` |
+| A2 Modules custom column | ✓ | `uc_design_notes` single header (no duplicate once `uc_` prefix used — see BUG-A6); overlay header "Customer Prospecting — Design Notes"; `1 Line` badge after save; expand chevron still opens nested features sub-table |
+| A3 Features custom column | ✓ | `uc_scratch_pad` saves; expanded row still renders Web App Notes + Implementation sections + References panel (Native/Android/Apple correctly absent for Web App-only feature) |
+| A4 Data Tables/Fields | ✓ | Saves on entity_type='table' and entity_type='field' |
+| A5 Entity delete cascade | ✓ | Concept id=24 + note row 329 deleted atomically; zero orphan rows |
+| A6 Column delete cascade | ✓ | column_def delete removed all 3 associated entity_notes rows |
+| A7 Debounce granularity | ✓ | 5 keystroke-simulated edits in 1.2s → exactly 1 change_log entry (id 4102) |
 
-**These tests should run in the fresh session at the start of Phase B** (§11 execution order), as the first action. Any regression found there must be fixed before Phase B can proceed.
+**Caveat**: ref autocomplete dropdown (A2 step 4, A3 step 3) verified only by render of existing refs — programmatic `input` events bypass the autocomplete keyboard handler. Unchanged from Phase 1, not a regression risk.
+
+**Incidental observation**: auto-sync toast fired twice during tests ("pushed 5620 rows", "pushed 5622 rows"). Unrelated to this PRD — flagging for data-sync owner.
 
 ### 4.3 Acceptance
 
@@ -928,31 +934,37 @@ Each phase should land as its own commit (or small commit series) with the messa
 - `M src/pages/SchemaPlanner.tsx` (unrelated work)
 - `?? src/components/schema-planner/SyncDiffViewer.tsx` (unrelated work from a different session)
 
-### 12.4 Recommended action for fresh session
+### 12.4 Phase A commit (landed 2026-04-17 session 2)
 
-**Commit the Phase 1 + Phase A work first** to establish a clean baseline before starting Phase B. Suggested commit message:
+Commit `c75660e [NOTES-DEPS-A] Phase 1 plumbing + BUG-A4 unsaved-row guard` landed:
+- The three PRD renames (moved to `docs/prds/`) — already staged
+- `docs/prds/NOTES-DEPENDENCIES-PRD.md` (this file)
+- Three BUG-A4 server guard hunks in `server/index.ts` (entityId <= 0 rejection on GET/PUT/DELETE `/api/schema-planner/notes`)
+- BUG-A4 client guard in `SchemaPlannerTab.tsx` (unsaved-row Notes click blocked with "Save this row first…" tooltip)
 
-```
-[NOTES-DEPS-A] Phase 1 plumbing + BUG-A4 unsaved-row guard
+Phase 1 plumbing was already committed in `8799c5d` in a prior session — not re-committed.
 
-Phase 1 (shared notes store):
-- Add _splan_entity_notes table with Concepts backfill
-- Add /api/schema-planner/notes endpoints (GET/PUT/DELETE)
-- Add cascade-delete for notes on entity delete + column delete
-- Add 'notes' column type to ColDef union + Add Column picker
-- Generalize fullscreen overlay from Concepts-only to all tabs
-- Add EntityNote client API + entity-notes cache
-- UX fix: inline hint for disabled Create button
+### 12.5 Launch instructions for Phase B session
 
-Phase A (audit):
-- Fix BUG-A4: block Notes click on unsaved rows (tempId<0) to
-  prevent orphan _splan_entity_notes rows. Client guards the
-  click; server rejects negative entityId defensively.
+**State at launch**:
+- `main` at `c75660e`. Phase A complete, all 7 browser tests pass (§4.4).
+- Dev server may still be running (background task on ports 3100 + 5174). If not: `npm run dev`.
+- Uncommitted working-tree files that MUST be left alone (other owners):
+  - `server/index.ts` — `requireLocal` on `/api/claude-md-stats` (hosted-mode gating)
+  - `src/pages/SchemaPlanner.tsx` — matching hosted-mode UI gating
+  - `src/components/schema-planner/NotebookTab.tsx`, `SyncDiffViewer.tsx` — unrelated
 
-PRD: docs/prds/NOTES-DEPENDENCIES-PRD.md
-```
+**Before starting Phase B, read**:
+1. §2 (design decisions D1–D8 — locked, do not revisit)
+2. §4.2 **BUG-A6** (the `uc_` prefix gotcha — applies to paired deps column_defs)
+3. §5 (full Phase B plan)
+4. §11 (commit sequencing + prefix `[NOTES-DEPS-B]`)
 
-Leave unrelated files (NotebookTab, SchemaPlanner page, SyncDiffViewer) to their owners — don't bundle them into this commit.
+**First Phase B action**: implement §5.1 (SQL table `_splan_entity_dependencies` in `server/db.ts`) + §5.2 (CRUD endpoints in `server/index.ts`). Commit as `[NOTES-DEPS-B] Add _splan_entity_dependencies + CRUD endpoints`. Then §5.3 (auto-extract on note save) + §5.4 (auto-pair column creation) as a second commit. Then §5.7 UI as a third.
+
+**Helper script available**: `scripts/db-peek.cjs` (created during Phase A testing — not committed, can stay local or be added if useful). Usage: `node scripts/db-peek.cjs {baseline|notes <type> <id>|log-since <id>|sql <query>}`.
+
+**CLAUDE.md non-negotiables** (repeat from §1.5): no destructive smoke tests, no emojis in files, no wireframe files (discuss in chat).
 
 ---
 
