@@ -55,8 +55,8 @@ export function rawToDisplay(
     })
     .replace(/\(m:(\d+)(?::([^)]*))?\)/g, (_, idStr, fallback) => {
       const mod = modules?.find((x) => x.id === Number(idStr));
-      if (mod) return `(💻 ${mod.name})`;
-      return fallback ? `(⚠💻 ${fallback})` : "(deleted)";
+      if (mod) return `(🌐 ${mod.name})`;
+      return fallback ? `(⚠🌐 ${fallback})` : "(deleted)";
     })
     .replace(/\(fe:(\d+)(?::([^)]*))?\)/g, (_, idStr, fallback) => {
       const feat = features?.find((x) => x.id === Number(idStr));
@@ -143,11 +143,11 @@ export function displayToRaw(
     }
   }
 
-  // Replace module refs — (💻 ModuleName) → (m:ID:name)
+  // Replace module refs — (🌐 ModuleName) → (m:ID:name)
   if (modules) {
     const sortedModules = [...modules].sort((a, b) => b.name.length - a.name.length);
     for (const mod of sortedModules) {
-      const display = `(💻 ${mod.name})`;
+      const display = `(🌐 ${mod.name})`;
       if (result.includes(display)) {
         result = result.split(display).join(`(m:${mod.id}:${mod.name})`);
       }

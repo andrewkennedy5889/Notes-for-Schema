@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import AgentsTab from "../components/schema-planner/AgentsTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, type SyncStatus } from "../lib/api";
 
 const START_COMMANDS = [
   { cmd: "/nexus-start", desc: "Start or restart March Nexus dev server" },
@@ -60,7 +61,7 @@ const COMMAND_GROUPS = [
 
 const TAB_ICONS: Record<string, string> = {
   projects: "📁",
-  modules: "◈",
+  modules: "🌐",
   features: "⚡",
   data_tables: "⊞",
   data_fields: "≡",
@@ -109,12 +110,12 @@ export const DEFAULT_REF_ICONS: Record<string, string> = {
   table: "",
   field: "",
   image: "🎨",
-  module: "💻",
+  module: "🌐",
   feature: "⚡",
   concept: "💡",
   research: "🔬",
 };
-const REF_ICON_OPTIONS = ["", "💻", "⚡", "💡", "🎨", "📋", "🔒", "⚠", "⊞", "≡", "⇌", "◈", "🧪", "⚙"];
+const REF_ICON_OPTIONS = ["", "🌐", "💻", "⚡", "💡", "🎨", "📋", "🔒", "⚠", "⊞", "≡", "⇌", "◈", "🧪", "⚙", "🔬"];
 const REF_TYPES = [
   { key: "table", label: "Table" },
   { key: "field", label: "Field" },
@@ -158,6 +159,75 @@ export default function SchemaPlanner() {
   const [githubPatPreview, setGithubPatPreview] = useState("");
   const [githubPatSaved, setGithubPatSaved] = useState(false);
   const [showPat, setShowPat] = useState(false);
+
+  // Sync state
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [syncLoading, setSyncLoading] = useState<'push' | 'pull' | 'deploy' | null>(null);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
+
+  // Load sync status on mount + poll every 60s
+  useEffect(() => {
+    const load = () => fetchSyncStatus().then(setSyncStatus).catch(() => {});
+    load();
+    const interval = setInterval(load, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleSyncPush = useCallback(async () => {
+    setSyncLoading('push');
+    setSyncResult(null);
+    try {
+      const result = await syncPush();
+      if (result.success) {
+        setSyncResult(`Pushed ${result.totalRows} rows to remote`);
+      } else {
+        setSyncResult(`Push failed: ${result.error}`);
+      }
+      fetchSyncStatus().then(setSyncStatus).catch(() => {});
+    } catch (e) {
+      setSyncResult(`Push failed: ${(e as Error).message}`);
+    } finally {
+      setSyncLoading(null);
+    }
+  }, []);
+
+  const handleSyncPull = useCallback(async () => {
+    setSyncLoading('pull');
+    setSyncResult(null);
+    try {
+      const result = await syncPull();
+      if (result.success) {
+        setSyncResult(`Pulled ${result.totalRows} rows from remote`);
+      } else {
+        setSyncResult(`Pull failed: ${result.error}`);
+      }
+      fetchSyncStatus().then(setSyncStatus).catch(() => {});
+    } catch (e) {
+      setSyncResult(`Pull failed: ${(e as Error).message}`);
+    } finally {
+      setSyncLoading(null);
+    }
+  }, []);
+
+  const handleDeployCode = useCallback(async () => {
+    setSyncLoading('deploy');
+    setSyncResult(null);
+    try {
+      const result = await deployCode();
+      if (result.success) {
+        const detail = result.status === 'nothing' ? result.message
+          : result.filesChanged ? `Deployed ${result.filesChanged} file(s) — ${result.commitHash || 'pushed'}`
+          : result.message;
+        setSyncResult(detail);
+      } else {
+        setSyncResult(`Deploy failed: ${result.error}`);
+      }
+    } catch (e) {
+      setSyncResult(`Deploy failed: ${(e as Error).message}`);
+    } finally {
+      setSyncLoading(null);
+    }
+  }, []);
 
   // Load PAT status from server on mount
   useEffect(() => {
@@ -254,9 +324,25 @@ export default function SchemaPlanner() {
                       {icon}
                     </span>
                     {sidebarOpen && (
-                      <span className="truncate font-medium" style={{ fontSize: 12 }}>
-                        {label}
-                      </span>
+                      <>
+                        <span className="truncate font-medium" style={{ fontSize: 12 }}>
+                          {label}
+                        </span>
+                        {tabKey === "settings" && syncStatus?.configured && (syncStatus.remote?.changeCount ?? 0) > 0 && (
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0 ml-auto"
+                            style={{ backgroundColor: "#f2b661" }}
+                            title={`${syncStatus.remote!.changeCount} unsaved remote change(s)`}
+                          />
+                        )}
+                        {tabKey === "settings" && syncStatus?.configured && (syncStatus.remote?.changeCount ?? 0) === 0 && syncStatus.lastSync && (
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0 ml-auto"
+                            style={{ backgroundColor: "#4ecb71" }}
+                            title="In sync"
+                          />
+                        )}
+                      </>
                     )}
                   </button>
                 );
@@ -566,6 +652,110 @@ export default function SchemaPlanner() {
                   github.com/settings/tokens
                 </a>
               </p>
+            </div>
+
+            {/* Data Sync */}
+            <div className="mb-8">
+              <h3 className="text-sm font-semibold mb-3" style={{ color: "var(--color-text)" }}>
+                Data Sync
+              </h3>
+              <p className="text-xs mb-4" style={{ color: "var(--color-text-muted)" }}>
+                Push local data to the remote web app, or pull remote changes back to your local database.
+              </p>
+
+              {!syncStatus ? (
+                <p className="text-xs" style={{ color: "var(--color-text-subtle)" }}>Loading sync status...</p>
+              ) : !syncStatus.configured ? (
+                <div className="text-xs p-3 rounded border" style={{ borderColor: "var(--color-divider)", color: "var(--color-text-muted)" }}>
+                  <p className="font-medium mb-1">Not configured</p>
+                  <p>Set <code>SYNC_REMOTE_URL</code> and <code>SYNC_REMOTE_PASSWORD</code> environment variables to enable sync.</p>
+                  {syncStatus.error && <p className="mt-1" style={{ color: "#e05555" }}>{syncStatus.error}</p>}
+                </div>
+              ) : (
+                <>
+                  {/* Status line */}
+                  <div className="flex items-center gap-2 mb-3">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ backgroundColor: (syncStatus.remote?.changeCount ?? 0) > 0 ? "#f2b661" : "#4ecb71" }}
+                    />
+                    <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                      {syncStatus.lastSync
+                        ? `Last sync: ${new Date(syncStatus.lastSync.syncedAt + 'Z').toLocaleString()} (${syncStatus.lastSync.direction}, ${syncStatus.lastSync.rowsSynced} rows)`
+                        : "Never synced"}
+                    </span>
+                  </div>
+
+                  {/* Change warnings */}
+                  {(syncStatus.remote?.changeCount ?? 0) > 0 && (
+                    <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(242,182,97,0.1)", border: "1px solid rgba(242,182,97,0.3)", color: "#f2b661" }}>
+                      Remote has {syncStatus.remote!.changeCount} change(s) since last sync — pull before pushing to avoid overwriting.
+                    </div>
+                  )}
+                  {(syncStatus.local?.changeCount ?? 0) > 0 && (
+                    <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(66,139,202,0.1)", border: "1px solid rgba(66,139,202,0.3)", color: "#428bca" }}>
+                      Local has {syncStatus.local!.changeCount} change(s) since last sync — push to update remote.
+                    </div>
+                  )}
+
+                  {syncStatus.error && (
+                    <div className="text-xs p-2 rounded mb-3" style={{ backgroundColor: "rgba(224,85,85,0.1)", border: "1px solid rgba(224,85,85,0.3)", color: "#e05555" }}>
+                      {syncStatus.error}
+                    </div>
+                  )}
+
+                  {/* Buttons */}
+                  <div className="flex items-center gap-3 mb-2">
+                    <button
+                      onClick={handleSyncPush}
+                      disabled={!!syncLoading}
+                      className="px-4 py-2 text-xs rounded font-medium transition-colors"
+                      style={{
+                        backgroundColor: syncLoading === 'push' ? "rgba(78,203,113,0.05)" : "rgba(78,203,113,0.15)",
+                        color: "#4ecb71",
+                        opacity: syncLoading && syncLoading !== 'push' ? 0.4 : 1,
+                      }}
+                    >
+                      {syncLoading === 'push' ? "Pushing..." : "Push Data"}
+                    </button>
+                    <button
+                      onClick={handleSyncPull}
+                      disabled={!!syncLoading}
+                      className="px-4 py-2 text-xs rounded font-medium transition-colors"
+                      style={{
+                        backgroundColor: syncLoading === 'pull' ? "rgba(66,139,202,0.05)" : "rgba(66,139,202,0.15)",
+                        color: "#428bca",
+                        opacity: syncLoading && syncLoading !== 'pull' ? 0.4 : 1,
+                      }}
+                    >
+                      {syncLoading === 'pull' ? "Pulling..." : "Pull Data"}
+                    </button>
+                    <button
+                      onClick={handleDeployCode}
+                      disabled={!!syncLoading}
+                      className="px-4 py-2 text-xs rounded font-medium transition-colors"
+                      style={{
+                        backgroundColor: syncLoading === 'deploy' ? "rgba(168,85,247,0.05)" : "rgba(168,85,247,0.15)",
+                        color: "#a855f7",
+                        opacity: syncLoading && syncLoading !== 'deploy' ? 0.4 : 1,
+                      }}
+                    >
+                      {syncLoading === 'deploy' ? "Deploying..." : "Deploy Code"}
+                    </button>
+                  </div>
+
+                  {/* Result message */}
+                  {syncResult && (
+                    <p className="text-xs mt-2" style={{ color: syncResult.includes('failed') ? "#e05555" : "#4ecb71" }}>
+                      {syncResult}
+                    </p>
+                  )}
+
+                  <p className="text-[10px] mt-3" style={{ color: "var(--color-text-subtle)" }}>
+                    Remote: {syncStatus.remoteUrl}
+                  </p>
+                </>
+              )}
             </div>
           </div>
         ) : (

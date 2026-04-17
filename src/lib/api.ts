@@ -295,3 +295,40 @@ export async function deleteColumnDef(id: number): Promise<{ success: boolean }>
   if (!res.ok) throw new Error(`deleteColumnDef failed: ${res.statusText}`);
   return res.json();
 }
+
+// ─── Data Sync ──────────────────────────────────────────────────────────────
+
+export interface SyncStatus {
+  configured: boolean;
+  error?: string;
+  remoteUrl?: string;
+  lastSync?: { syncedAt: string; direction: string; rowsSynced: number } | null;
+  remote?: { changeCount: number; changes: Array<{ entity_type: string; entity_id: number; action: string; field_changed?: string; changed_at: string }> };
+  local?: { changeCount: number; changes: Array<{ entity_type: string; entity_id: number; action: string; field_changed?: string; changed_at: string }> };
+}
+
+export async function fetchSyncStatus(): Promise<SyncStatus> {
+  const res = await fetch(`${BASE}/sync/remote-status`);
+  if (res.status === 404) return { configured: false, error: 'Sync not available in production' };
+  if (!res.ok) throw new Error(`fetchSyncStatus failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function syncPush(): Promise<{ success: boolean; totalRows: number; error?: string }> {
+  const res = await fetch(`${BASE}/sync/push`, { method: 'POST' });
+  return res.json();
+}
+
+export async function syncPull(): Promise<{ success: boolean; totalRows: number; error?: string }> {
+  const res = await fetch(`${BASE}/sync/pull`, { method: 'POST' });
+  return res.json();
+}
+
+export async function deployCode(message?: string): Promise<{ success: boolean; status: string; message: string; commitHash?: string; filesChanged?: number; error?: string; detail?: string }> {
+  const res = await fetch(`${BASE}/sync/deploy-code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+  return res.json();
+}

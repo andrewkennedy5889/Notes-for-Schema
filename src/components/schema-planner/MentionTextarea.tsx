@@ -201,7 +201,7 @@ function buildHighlightHTML(
       if (tableNames.has(inner)) {
         return `<span style="color:#a855f7;pointer-events:auto;cursor:pointer" data-ref-type="table" data-ref-name="${esc(inner)}">(${inner})</span>`;
       }
-      if (inner.startsWith("💻 ") && moduleDisplayNames?.has(inner.slice(3))) {
+      if (inner.startsWith("🌐 ") && moduleDisplayNames?.has(inner.slice(3))) {
         const name = inner.slice(3);
         return `<span style="color:#e67d4a;pointer-events:auto;cursor:pointer" data-ref-type="module" data-ref-name="${esc(name)}">(${inner})</span>`;
       }
@@ -1301,7 +1301,7 @@ export function MentionTextarea({
         : opt.type === "image"
         ? `(🎨 ${opt.label})`
         : opt.type === "module"
-        ? `(💻 ${opt.label})`
+        ? `(🌐 ${opt.label})`
         : opt.type === "feature"
         ? `(⚡ ${opt.label})`
         : opt.type === "concept"

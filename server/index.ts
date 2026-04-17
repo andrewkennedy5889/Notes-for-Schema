@@ -4,6 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import crypto from 'crypto';
 import { exec } from 'child_process';
 import { fileURLToPath } from 'url';
 import { getDb } from './db.js';
@@ -11,6 +12,24 @@ import { parseRow, prepareRow, camelToSnake } from './utils.js';
 import { authRouter, authMiddleware } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Load .env file in dev mode (no dependency needed)
+if (process.env.NODE_ENV !== 'production') {
+  const envPath = path.join(__dirname, '..', '.env');
+  if (fs.existsSync(envPath)) {
+    for (const line of fs.readFileSync(envPath, 'utf-8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        const key = trimmed.slice(0, eq).trim();
+        const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+        if (!process.env[key]) process.env[key] = val;
+      }
+    }
+  }
+}
+
 const IMAGE_STORAGE = process.env.IMAGE_STORAGE_PATH || path.join(__dirname, '..', 'Image Storage');
 
 const app = express();
@@ -1390,6 +1409,217 @@ app.delete('/api/agents/schedules/:agentId', (req: Request, res: Response) => {
   } else {
     doRemove();
   }
+});
+
+// ─── Sync endpoints (dev-only) ──────────────────────────────────────────────
+
+const SYNC_REMOTE_URL = process.env.SYNC_REMOTE_URL || '';
+const SYNC_REMOTE_PASSWORD = process.env.SYNC_REMOTE_PASSWORD || '';
+
+function getSyncAuth(): { cookie: string; baseUrl: string } | null {
+  if (!SYNC_REMOTE_URL || !SYNC_REMOTE_PASSWORD) return null;
+  const token = crypto.createHmac('sha256', SYNC_REMOTE_PASSWORD).update('schema-planner-session').digest('hex');
+  return { cookie: `splan_session=${token}`, baseUrl: SYNC_REMOTE_URL.replace(/\/+$/, '') };
+}
+
+// Check if remote has changes since last sync
+app.get('/api/sync/remote-status', async (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
+  const auth = getSyncAuth();
+  if (!auth) return void res.json({ configured: false, error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
+
+  try {
+    const remote = await fetch(`${auth.baseUrl}/api/sync-status`, { headers: { Cookie: auth.cookie } });
+    if (!remote.ok) return void res.json({ configured: true, error: `Remote returned ${remote.status}` });
+    const remoteStatus = await remote.json() as { lastSync: unknown; changesSinceSync: unknown[]; changeCount: number };
+
+    // Also check local changes since last sync
+    const db = getDb();
+    const lastSync = db.prepare('SELECT * FROM _splan_sync_meta ORDER BY synced_at DESC LIMIT 1')
+      .get() as { synced_at: string; sync_direction: string; rows_synced: number } | undefined;
+
+    let localChangeCount = 0;
+    let localChanges: unknown[] = [];
+    if (lastSync) {
+      localChanges = db.prepare(
+        `SELECT entity_type, entity_id, action, field_changed, changed_at
+         FROM _splan_change_log WHERE changed_at > ? ORDER BY changed_at DESC LIMIT 50`
+      ).all(lastSync.synced_at);
+      localChangeCount = (db.prepare(
+        'SELECT COUNT(*) as cnt FROM _splan_change_log WHERE changed_at > ?'
+      ).get(lastSync.synced_at) as { cnt: number }).cnt;
+    }
+
+    return void res.json({
+      configured: true,
+      remoteUrl: auth.baseUrl,
+      lastSync: lastSync ? { syncedAt: lastSync.synced_at, direction: lastSync.sync_direction, rowsSynced: lastSync.rows_synced } : null,
+      remote: { changeCount: remoteStatus.changeCount, changes: remoteStatus.changesSinceSync },
+      local: { changeCount: localChangeCount, changes: localChanges },
+    });
+  } catch (e: unknown) {
+    return void res.json({ configured: true, error: `Failed to reach remote: ${(e as Error).message}` });
+  }
+});
+
+// Push local → remote
+app.post('/api/sync/push', async (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
+  const auth = getSyncAuth();
+  if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
+
+  try {
+    const db = getDb();
+    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta']);
+    const tableRows = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_splan_%' ORDER BY name"
+    ).all() as Array<{ name: string }>;
+
+    const tables: Record<string, unknown[]> = {};
+    let totalRows = 0;
+    for (const { name } of tableRows) {
+      if (SKIP.has(name)) continue;
+      const rows = db.prepare(`SELECT * FROM ${name}`).all();
+      tables[name] = rows;
+      totalRows += rows.length;
+    }
+
+    const importRes = await fetch(`${auth.baseUrl}/api/db-import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: auth.cookie, 'X-Sync-Source': 'local-push' },
+      body: JSON.stringify({ tables }),
+    });
+
+    if (!importRes.ok) {
+      const errText = await importRes.text();
+      return void res.status(500).json({ error: `Remote import failed: ${errText.substring(0, 300)}` });
+    }
+
+    const result = await importRes.json() as { success: boolean; imported: Record<string, number> };
+
+    // Record sync locally
+    db.prepare('INSERT INTO _splan_sync_meta (sync_direction, remote_url, rows_synced) VALUES (?, ?, ?)')
+      .run('push', auth.baseUrl, totalRows);
+
+    return void res.json({ success: true, totalRows, imported: result.imported });
+  } catch (e: unknown) {
+    return void res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+// Pull remote → local
+app.post('/api/sync/pull', async (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
+  const auth = getSyncAuth();
+  if (!auth) return void res.status(400).json({ error: 'Set SYNC_REMOTE_URL and SYNC_REMOTE_PASSWORD env vars' });
+
+  try {
+    const exportRes = await fetch(`${auth.baseUrl}/api/db-export`, { headers: { Cookie: auth.cookie } });
+    if (!exportRes.ok) return void res.status(500).json({ error: `Remote export failed: ${exportRes.status}` });
+
+    const { tables } = await exportRes.json() as { tables: Record<string, Record<string, unknown>[]> };
+
+    const db = getDb();
+    const SKIP = new Set(['_splan_all_tests', '_splan_grouping_presets', '_splan_sync_meta']);
+    const ENTITY_TABLE_MAP: Record<string, string> = {
+      modules: '_splan_modules', features: '_splan_features', concepts: '_splan_concepts',
+      data_tables: '_splan_data_tables', data_fields: '_splan_data_fields',
+      projects: '_splan_projects', research: '_splan_research', prototypes: '_splan_prototypes',
+    };
+
+    db.pragma('foreign_keys = OFF');
+    let totalRows = 0;
+
+    try {
+      const importAll = db.transaction(() => {
+        // Phase 1: column_defs
+        if (tables['_splan_column_defs']?.length) {
+          const cdRows = tables['_splan_column_defs'];
+          db.exec('DELETE FROM _splan_column_defs');
+          const cols = Object.keys(cdRows[0]);
+          const placeholders = cols.map(() => '?').join(', ');
+          const stmt = db.prepare(`INSERT INTO _splan_column_defs (${cols.join(', ')}) VALUES (${placeholders})`);
+          for (const row of cdRows) stmt.run(...cols.map(c => row[c] ?? null));
+          for (const def of cdRows) {
+            const sqlTable = ENTITY_TABLE_MAP[def.entity_type as string];
+            if (!sqlTable || def.column_type === 'formula') continue;
+            const sqlType = def.column_type === 'int' ? 'INTEGER' : def.column_type === 'boolean' ? "INTEGER NOT NULL DEFAULT 0" : "TEXT NOT NULL DEFAULT ''";
+            try { db.exec(`ALTER TABLE ${sqlTable} ADD COLUMN ${def.column_key} ${sqlType}`); } catch { /* exists */ }
+          }
+        }
+
+        // Phase 2: all other tables
+        for (const [tableName, rows] of Object.entries(tables)) {
+          if (SKIP.has(tableName) || tableName === '_splan_column_defs' || !Array.isArray(rows)) continue;
+          const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(tableName);
+          if (!exists) continue;
+          db.exec(`DELETE FROM ${tableName}`);
+          if (rows.length === 0) continue;
+          const tableInfo = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+          const existingCols = new Set(tableInfo.map(c => c.name));
+          const cols = Object.keys(rows[0]).filter(c => existingCols.has(c));
+          if (cols.length === 0) continue;
+          const stmt = db.prepare(`INSERT INTO ${tableName} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`);
+          for (const row of rows) { stmt.run(...cols.map(c => row[c] ?? null)); totalRows++; }
+        }
+      });
+      importAll();
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+
+    db.prepare('INSERT INTO _splan_sync_meta (sync_direction, remote_url, rows_synced) VALUES (?, ?, ?)')
+      .run('pull', auth.baseUrl, totalRows);
+
+    return void res.json({ success: true, totalRows });
+  } catch (e: unknown) {
+    return void res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+// Deploy code: git add, commit, push (dev-only)
+app.post('/api/sync/deploy-code', (req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
+
+  const PROJECT_ROOT = path.join(__dirname, '..');
+  const message = (req.body as { message?: string })?.message || 'Deploy from Schema Planner';
+
+  // First check if there are changes
+  exec('git status --porcelain', { cwd: PROJECT_ROOT }, (statusErr, statusOut) => {
+    if (statusErr) return void res.status(500).json({ error: `git status failed: ${statusErr.message}` });
+
+    if (!statusOut.trim()) {
+      // No changes — just push in case there are unpushed commits
+      exec('git log origin/main..HEAD --oneline', { cwd: PROJECT_ROOT }, (logErr, logOut) => {
+        if (logErr || !logOut.trim()) {
+          return void res.json({ success: true, status: 'nothing', message: 'No changes to deploy' });
+        }
+        // There are unpushed commits, push them
+        exec('git push origin main', { cwd: PROJECT_ROOT }, (pushErr, pushOut) => {
+          if (pushErr) return void res.status(500).json({ error: `git push failed: ${pushErr.message}` });
+          return void res.json({ success: true, status: 'pushed', message: `Pushed unpushed commits`, detail: pushOut.trim() });
+        });
+      });
+      return;
+    }
+
+    // There are changes — add, commit, push
+    const commitMsg = `${message}\n\nCo-Authored-By: Schema Planner <noreply@schemaplanner.dev>`;
+    const cmd = `git add -A && git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push origin main`;
+    exec(cmd, { cwd: PROJECT_ROOT }, (err, stdout, stderr) => {
+      if (err) return void res.status(500).json({ error: `Deploy failed: ${err.message}`, detail: stderr });
+      // Extract commit hash from output
+      const hashMatch = stdout.match(/\[main ([a-f0-9]+)\]/);
+      return void res.json({
+        success: true,
+        status: 'deployed',
+        message: `Committed and pushed`,
+        commitHash: hashMatch?.[1] || null,
+        filesChanged: statusOut.trim().split('\n').length,
+        detail: stdout.trim(),
+      });
+    });
+  });
 });
 
 // ─── GET /api/db-export — bulk export all tables ────────────────────────────
