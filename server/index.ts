@@ -1584,18 +1584,21 @@ app.post('/api/sync/deploy-code', (req: Request, res: Response) => {
   const PROJECT_ROOT = path.join(__dirname, '..');
   const message = (req.body as { message?: string })?.message || 'Deploy from Schema Planner';
 
+  // Use cmd.exe on Windows so git credential manager works
+  const execOpts = { cwd: PROJECT_ROOT, shell: os.platform() === 'win32' ? 'cmd.exe' : undefined } as const;
+
   // First check if there are changes
-  exec('git status --porcelain', { cwd: PROJECT_ROOT }, (statusErr, statusOut) => {
+  exec('git status --porcelain', execOpts, (statusErr, statusOut) => {
     if (statusErr) return void res.status(500).json({ error: `git status failed: ${statusErr.message}` });
 
     if (!statusOut.trim()) {
       // No changes — just push in case there are unpushed commits
-      exec('git log origin/main..HEAD --oneline', { cwd: PROJECT_ROOT }, (logErr, logOut) => {
+      exec('git log origin/main..HEAD --oneline', execOpts, (logErr, logOut) => {
         if (logErr || !logOut.trim()) {
           return void res.json({ success: true, status: 'nothing', message: 'No changes to deploy' });
         }
         // There are unpushed commits, push them
-        exec('git push origin main', { cwd: PROJECT_ROOT }, (pushErr, pushOut) => {
+        exec('git push origin main', execOpts, (pushErr, pushOut) => {
           if (pushErr) return void res.status(500).json({ error: `git push failed: ${pushErr.message}` });
           return void res.json({ success: true, status: 'pushed', message: `Pushed unpushed commits`, detail: pushOut.trim() });
         });
@@ -1605,8 +1608,10 @@ app.post('/api/sync/deploy-code', (req: Request, res: Response) => {
 
     // There are changes — add, commit, push
     const commitMsg = `${message}\n\nCo-Authored-By: Schema Planner <noreply@schemaplanner.dev>`;
-    const cmd = `git add -A && git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push origin main`;
-    exec(cmd, { cwd: PROJECT_ROOT }, (err, stdout, stderr) => {
+    const escapedMsg = os.platform() === 'win32' ? commitMsg.replace(/"/g, '""') : commitMsg.replace(/"/g, '\\"');
+    const sep = os.platform() === 'win32' ? ' & ' : ' && ';
+    const cmd = `git add -A${sep}git commit -m "${escapedMsg}"${sep}git push origin main`;
+    exec(cmd, execOpts, (err, stdout, stderr) => {
       if (err) return void res.status(500).json({ error: `Deploy failed: ${err.message}`, detail: stderr });
       // Extract commit hash from output
       const hashMatch = stdout.match(/\[main ([a-f0-9]+)\]/);
