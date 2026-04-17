@@ -1,12 +1,18 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, Suspense, lazy } from "react";
 import { useSearchParams } from "react-router-dom";
 import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
-import AgentsTab from "../components/schema-planner/AgentsTab";
-import NotebookTab from "../components/schema-planner/NotebookTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
 import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, fetchLastDeploy, fetchLocalGitStatus, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt, type LastDeploy, type LocalGitStatus } from "../lib/api";
-import SyncDiffViewer from "../components/schema-planner/SyncDiffViewer";
 import AutoSyncToast from "../components/schema-planner/AutoSyncToast";
+
+// Conditionally-rendered panels — lazy-loaded to trim the initial bundle
+const AgentsTab = lazy(() => import("../components/schema-planner/AgentsTab"));
+const NotebookTab = lazy(() => import("../components/schema-planner/NotebookTab"));
+const SyncDiffViewer = lazy(() => import("../components/schema-planner/SyncDiffViewer"));
+
+const LazyFallback = ({ label }: { label: string }) => (
+  <div className="p-4 text-xs" style={{ color: "var(--color-text-subtle)" }}>Loading {label}…</div>
+);
 
 const START_COMMANDS = [
   { cmd: "/nexus-start", desc: "Start or restart March Nexus dev server" },
@@ -1105,9 +1111,13 @@ export default function SchemaPlanner() {
       {/* Main content */}
       <main className={`flex-1 overflow-auto ${activeTab === "notebook" ? "p-0" : "p-4"}`} style={{ minWidth: 0 }}>
         {activeTab === "notebook" ? (
-          <NotebookTab />
+          <Suspense fallback={<LazyFallback label="notebook" />}>
+            <NotebookTab />
+          </Suspense>
         ) : activeTab === "agents" ? (
-          <AgentsTab />
+          <Suspense fallback={<LazyFallback label="agents" />}>
+            <AgentsTab />
+          </Suspense>
         ) : activeTab === "settings" ? (
           <div style={{ maxWidth: 600 }}>
             <h2 className="text-lg font-bold mb-6" style={{ color: "var(--color-text)" }}>Settings</h2>
@@ -1428,6 +1438,40 @@ export default function SchemaPlanner() {
                         </>
                       )}
                     </span>
+                    {/* Retry: only for non-success deploys, and only after 2 minutes
+                         have elapsed so we don't double-fire while Railway may still be building. */}
+                    {lastDeploy && lastDeploy.status !== 'success' && !isHosted && !syncLoading && (() => {
+                      const attemptedTs = Date.parse(lastDeploy.attemptedAt.includes('Z') ? lastDeploy.attemptedAt : lastDeploy.attemptedAt + 'Z');
+                      const ageMs = Date.now() - attemptedTs;
+                      const canRetry = !Number.isNaN(attemptedTs) && ageMs >= 2 * 60 * 1000;
+                      if (!canRetry) {
+                        const secondsLeft = Math.max(0, Math.ceil((2 * 60 * 1000 - ageMs) / 1000));
+                        return (
+                          <span
+                            className="text-[10px]"
+                            style={{ color: "var(--color-text-subtle)" }}
+                            title="Retry becomes available 2 minutes after the failed attempt so Railway has time to settle"
+                          >
+                            Retry in {secondsLeft >= 60 ? `${Math.ceil(secondsLeft / 60)}m` : `${secondsLeft}s`}
+                          </span>
+                        );
+                      }
+                      return (
+                        <button
+                          type="button"
+                          onClick={handleDeployCode}
+                          className="text-xs px-2 py-0.5 rounded border transition-colors"
+                          style={{
+                            borderColor: "rgba(168,85,247,0.4)",
+                            backgroundColor: "rgba(168,85,247,0.08)",
+                            color: "#a855f7",
+                          }}
+                          title="Retry deploy"
+                        >
+                          Retry Deploy
+                        </button>
+                      );
+                    })()}
                   </div>
 
                   {/* Change warnings */}
@@ -1613,7 +1657,11 @@ export default function SchemaPlanner() {
                         )}
 
                         {/* Diff viewer */}
-                        {showDiff && syncDiff && <SyncDiffViewer diff={syncDiff} />}
+                        {showDiff && syncDiff && (
+                          <Suspense fallback={<LazyFallback label="diff" />}>
+                            <SyncDiffViewer diff={syncDiff} />
+                          </Suspense>
+                        )}
                       </>
                     );
                   })()}
