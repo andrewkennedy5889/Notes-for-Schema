@@ -59,6 +59,14 @@ export async function fetchCounts(): Promise<Record<string, number>> {
   return res.json();
 }
 
+export type ClaudeMdStats = { lines: number; bytes: number; mtime: number; path: string };
+
+export async function fetchClaudeMdStats(): Promise<ClaudeMdStats> {
+  const res = await fetch(`${BASE}/claude-md-stats`);
+  if (!res.ok) throw new Error(`fetchClaudeMdStats failed: ${res.statusText}`);
+  return res.json();
+}
+
 export async function fetchMatrix(): Promise<unknown[]> {
   const res = await fetch(`${BASE}/schema-planner/matrix`);
   if (!res.ok) throw new Error(`fetchMatrix failed: ${res.statusText}`);

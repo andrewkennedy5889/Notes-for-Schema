@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, Suspense, lazy } from 
 import { useSearchParams } from "react-router-dom";
 import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
-import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, fetchLastDeploy, fetchLocalGitStatus, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt, type LastDeploy, type LocalGitStatus } from "../lib/api";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, fetchLastDeploy, fetchLocalGitStatus, fetchClaudeMdStats, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt, type LastDeploy, type LocalGitStatus, type ClaudeMdStats } from "../lib/api";
 import AutoSyncToast from "../components/schema-planner/AutoSyncToast";
 
 // Conditionally-rendered panels — lazy-loaded to trim the initial bundle
@@ -181,6 +181,15 @@ export default function SchemaPlanner() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [commandsOpen, setCommandsOpen] = useState(false);
   const [depthColors, setDepthColors] = useDepthColors();
+  const [claudeMdStats, setClaudeMdStats] = useState<ClaudeMdStats | null>(null);
+  const [claudeMdError, setClaudeMdError] = useState<string | null>(null);
+  const loadClaudeMdStats = useCallback(() => {
+    setClaudeMdError(null);
+    fetchClaudeMdStats()
+      .then(setClaudeMdStats)
+      .catch((e: Error) => { setClaudeMdStats(null); setClaudeMdError(e.message); });
+  }, []);
+  useEffect(() => { loadClaudeMdStats(); }, [loadClaudeMdStats]);
   const [refColors, setRefColors, refIcons, setRefIcons] = useRefAppearance();
   const [githubPat, setGithubPat] = useState("");
   const [githubPatPreview, setGithubPatPreview] = useState("");
@@ -1121,6 +1130,36 @@ export default function SchemaPlanner() {
         ) : activeTab === "settings" ? (
           <div style={{ maxWidth: 600 }}>
             <h2 className="text-lg font-bold mb-6" style={{ color: "var(--color-text)" }}>Settings</h2>
+
+            {/* CLAUDE.md stats */}
+            <div className="mb-8">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>
+                  CLAUDE.md
+                </h3>
+                <button
+                  type="button"
+                  onClick={loadClaudeMdStats}
+                  className="text-xs px-2 py-1 rounded border"
+                  style={{ color: "var(--color-text-muted)", borderColor: "var(--color-border)" }}
+                >
+                  Refresh
+                </button>
+              </div>
+              {claudeMdError ? (
+                <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  {claudeMdError}
+                </p>
+              ) : claudeMdStats ? (
+                <div className="flex flex-col gap-1 text-xs font-mono" style={{ color: "var(--color-text-muted)" }}>
+                  <div><span className="inline-block w-16">Lines:</span>{claudeMdStats.lines.toLocaleString()}</div>
+                  <div><span className="inline-block w-16">Size:</span>{claudeMdStats.bytes.toLocaleString()} bytes</div>
+                  <div><span className="inline-block w-16">Modified:</span>{new Date(claudeMdStats.mtime).toLocaleString()}</div>
+                </div>
+              ) : (
+                <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>Loading…</p>
+              )}
+            </div>
 
             {/* Section Depth Colors */}
             <div className="mb-8">
