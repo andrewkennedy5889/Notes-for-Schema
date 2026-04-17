@@ -29,7 +29,7 @@ import { CSS as DndCSS } from "@dnd-kit/utilities";
 
 // Schema planner extracted modules
 import type { ColDef, TableConfig, GroupingOperator, GroupingRule, GroupingConfig, GroupingCondition, FeatureRefInfo, ExtractedRef, SortEntry, FilterRule, ColDisplayConfig, ColumnSeparator, ViewPresetConfig, RuleCondition, RuleRecord } from "./types";
-import { TABLE_CONFIGS, CRUD_TABS, SUB_TABS, TAB_DEPS, TAB_INVALIDATES, DEFAULT_CHECKLIST_ITEMS, PILL_COLORS, MODULE_FEATURE_COLS, PLATFORM_OPTIONS, PLATFORM_COLORS, PLATFORM_NOTE_SECTIONS, OWNERSHIP_OPTIONS, EMPTY_IMAGES, GROUP_COLORS, DATA_TYPE_DESCRIPTIONS, FIELD_SUB_COLS, PAGE_SIZE_OPTIONS, TAG_TIER_COLORS } from "./constants";
+import { TABLE_CONFIGS, CRUD_TABS, SUB_TABS, TAB_DEPS, TAB_INVALIDATES, DEFAULT_CHECKLIST_ITEMS, PILL_COLORS, MODULE_FEATURE_COLS, PLATFORM_OPTIONS, PLATFORM_COLORS, OWNERSHIP_OPTIONS, EMPTY_IMAGES, GROUP_COLORS, DATA_TYPE_DESCRIPTIONS, FIELD_SUB_COLS, PAGE_SIZE_OPTIONS, TAG_TIER_COLORS } from "./constants";
 import { GROUPING_OPERATORS, evaluateMultiLevelGrouping, normalizeGroupingConfig, deriveValueFromRule, flattenGroupNodes } from "./grouping-engine";
 import { REF_REGEX, extractRefs, rawToDisplay, displayToRaw, toSnakeCase, validateFieldName, nameSimilarity, findSimilarNames, extractRefsFromNotes, FmtType, FmtRange, fmtStyle, toggleFmtRange, clearFmtRange, adjustRangesForEdit, toggleListPrefix } from "./text-utils";
 import { RichRefText } from "./RichRefText";
@@ -5352,126 +5352,48 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                         }
                       };
 
-                      // Filter visible note sections based on feature's own platforms
-                      const visibleSections = PLATFORM_NOTE_SECTIONS.filter((sec) => {
-                        if ("showWhenAnyNative" in sec && sec.showWhenAnyNative) return hasAnyNative;
-                        return sec.platform ? featurePlatforms.has(sec.platform) : false;
-                      });
+                      // Unified notes replace the legacy per-platform rendering (PRD §7.3, D3).
+                      // All content now lives in _splan_entity_notes under note_key='notes'; use
+                      // `## Section` headers for per-platform or per-step organization.
+                      const fidUnified = row.featureId as number;
+                      const unifiedCacheKey = noteCacheKey('feature', fidUnified, 'notes');
+                      const unifiedCached = entityNotesCache[unifiedCacheKey];
+                      const unifiedInitial = unifiedCached?.content ?? '';
+                      const unifiedInitialFmt = (Array.isArray(unifiedCached?.notesFmt) ? unifiedCached?.notesFmt : []) as FmtRange[];
+                      const unifiedInitialCollapsed = unifiedCached?.collapsedSections as Record<string, { body: string; bodyFmt: FmtRange[] }> | undefined;
+                      const unifiedInitialTables = unifiedCached?.embeddedTables as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined;
+                      const unifiedPersist = async (
+                        content: string | null,
+                        fmt: unknown,
+                        collapsed: Record<string, unknown> | undefined,
+                        tables: Record<string, unknown> | undefined,
+                      ) => {
+                        try {
+                          const saved = await saveEntityNote({
+                            entityType: 'feature',
+                            entityId: fidUnified,
+                            noteKey: 'notes',
+                            content,
+                            notesFmt: fmt,
+                            collapsedSections: collapsed ?? {},
+                            embeddedTables: tables ?? {},
+                          });
+                          setEntityNotesCache((prev) => ({ ...prev, [unifiedCacheKey]: saved }));
+                          refreshDependenciesForEntity('feature', fidUnified);
+                        } catch (err) { console.error('Failed to save feature note:', err); }
+                      };
+                      void hasAnyNative; void featurePlatforms;
 
                       return (
                       <tr className="border-b" style={{ borderColor: "var(--color-divider)", backgroundColor: "var(--color-surface)" }}>
                         <td colSpan={visibleMixedCols.length + 2} className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
                           <div className="space-y-3 text-xs">
-                            {/* Web App Notes — full width */}
-                            {(() => {
-                              const webAppSec = visibleSections.find((s) => s.key === "notes");
-                              if (!webAppSec) return null;
-                              const platformColor = PLATFORM_COLORS["Web App"];
-                              return (
-                                <FullscreenNoteWrapper label={webAppSec.label} platformColor={platformColor.text}>
-                                  <FeatureMentionField
-                                    initial={String(row[webAppSec.key] ?? "")}
-                                    initialFmt={(Array.isArray(row[webAppSec.fmtKey]) ? row[webAppSec.fmtKey] : []) as FmtRange[]}
-                                    onCommit={(text, fmt, collapsed, tables) => {
-                                      const prev = (row.collapsedSections as Record<string, unknown>) ?? {};
-                                      const prevTables = (row.embeddedTables as Record<string, unknown>) ?? {};
-                                      const updated = { ...row, [webAppSec.key]: text || null, [webAppSec.fmtKey]: fmt, ...(collapsed !== undefined ? { collapsedSections: { ...prev, [webAppSec.key]: Object.keys(collapsed).length > 0 ? collapsed : undefined } } : {}), ...(tables !== undefined ? { embeddedTables: { ...prevTables, [webAppSec.key]: Object.keys(tables).length > 0 ? tables : undefined } } : {}) };
-                                      applyLocalUpdate("features", updated, `Inline edit: ${webAppSec.key}`);
-                                    }}
-                                    tables={mentionTables}
-                                    fields={mentionFields}
-                                    tableNames={mentionTableNames}
-                                    fieldDisplayNames={mentionFieldDisplayNames}
-                                    images={featureImages}
-                                    modules={mentionModules}
-                                    features={mentionFeatures}
-                                concepts={mentionConcepts}
-                                research={mentionResearch}
-                                    onRefNavigate={handleRefNav}
-                                    onCreateRef={handleCreateRef}
-                                    tableDetails={data.data_tables as Array<Record<string, unknown>>}
-                                    onPickTableForField={openTablePickerForField}
-                                    placeholder={`${webAppSec.label}... type ( to reference a table, field, or image`}
-                                    initialCollapsed={((row.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {})[webAppSec.key]}
-                                    onCollapsedChange={(collapsed) => {
-                                      const prev = (row.collapsedSections as Record<string, unknown>) ?? {};
-                                      const updated = { ...row, collapsedSections: { ...prev, [webAppSec.key]: Object.keys(collapsed).length > 0 ? collapsed : undefined } };
-                                      applyLocalUpdate("features", updated, `Collapse state: ${webAppSec.key}`);
-                                    }}
-                                    initialTables={((row.embeddedTables as Record<string, Record<string, unknown>> | null) ?? {})[webAppSec.key] as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined}
-                                    onTablesChange={(tbls) => {
-                                      const prev = (row.embeddedTables as Record<string, unknown>) ?? {};
-                                      const updated = { ...row, embeddedTables: { ...prev, [webAppSec.key]: Object.keys(tbls).length > 0 ? tbls : undefined } };
-                                      applyLocalUpdate("features", updated, `Table change: ${webAppSec.key}`);
-                                    }}
-                                    noteContext={{ module: section.name || undefined, moduleColor: moduleColColor, feature: String(row.featureName || ""), featureColor: featureColColor, field: webAppSec.label, fieldColor: "#4ecb71" }}
-                                  />
-                                </FullscreenNoteWrapper>
-                              );
-                            })()}
-                            {/* Other platform note sections — 2-column grid */}
-                            {visibleSections.filter((s) => s.key !== "notes").length > 0 && (
-                            <div className="grid grid-cols-2 gap-4">
-                              {visibleSections.filter((s) => s.key !== "notes").map((sec) => {
-                                const platformColor = sec.platform ? PLATFORM_COLORS[sec.platform] : (sec.key === "nativeNotes" ? { bg: "rgba(242,182,97,0.1)", text: "#f2b661", border: "#f2b66133" } : null);
-                                return (
-                                  <FullscreenNoteWrapper key={sec.key} label={sec.label} platformColor={platformColor?.text || "#f2b661"}>
-                                    <FeatureMentionField
-                                      initial={String(row[sec.key] ?? "")}
-                                      initialFmt={(Array.isArray(row[sec.fmtKey]) ? row[sec.fmtKey] : []) as FmtRange[]}
-                                      onCommit={(text, fmt, collapsed, tables) => {
-                                        const prev = (row.collapsedSections as Record<string, unknown>) ?? {};
-                                        const prevTables = (row.embeddedTables as Record<string, unknown>) ?? {};
-                                        const updated = { ...row, [sec.key]: text || null, [sec.fmtKey]: fmt, ...(collapsed !== undefined ? { collapsedSections: { ...prev, [sec.key]: Object.keys(collapsed).length > 0 ? collapsed : undefined } } : {}), ...(tables !== undefined ? { embeddedTables: { ...prevTables, [sec.key]: Object.keys(tables).length > 0 ? tables : undefined } } : {}) };
-                                        applyLocalUpdate("features", updated, `Inline edit: ${sec.key}`);
-                                      }}
-                                      tables={mentionTables}
-                                      fields={mentionFields}
-                                      tableNames={mentionTableNames}
-                                      fieldDisplayNames={mentionFieldDisplayNames}
-                                      images={featureImages}
-                                      modules={mentionModules}
-                                      features={mentionFeatures}
-                                concepts={mentionConcepts}
-                                research={mentionResearch}
-                                      onRefNavigate={handleRefNav}
-                                      onCreateRef={handleCreateRef}
-                                      tableDetails={data.data_tables as Array<Record<string, unknown>>}
-                                      onPickTableForField={openTablePickerForField}
-                                      placeholder={`${sec.label}... type ( to reference a table, field, or image`}
-                                      initialCollapsed={((row.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {})[sec.key]}
-                                      onCollapsedChange={(collapsed) => {
-                                        const prev = (row.collapsedSections as Record<string, unknown>) ?? {};
-                                        const updated = { ...row, collapsedSections: { ...prev, [sec.key]: Object.keys(collapsed).length > 0 ? collapsed : undefined } };
-                                        applyLocalUpdate("features", updated, `Collapse state: ${sec.key}`);
-                                      }}
-                                      initialTables={((row.embeddedTables as Record<string, Record<string, unknown>> | null) ?? {})[sec.key] as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined}
-                                      onTablesChange={(tbls) => {
-                                        const prev = (row.embeddedTables as Record<string, unknown>) ?? {};
-                                        const updated = { ...row, embeddedTables: { ...prev, [sec.key]: Object.keys(tbls).length > 0 ? tbls : undefined } };
-                                        applyLocalUpdate("features", updated, `Table change: ${sec.key}`);
-                                      }}
-                                      noteContext={{ module: section.name || undefined, moduleColor: moduleColColor, feature: String(row.featureName || ""), featureColor: featureColColor, field: sec.label, fieldColor: sec.platform ? (PLATFORM_COLORS[sec.platform]?.text || "#f2b661") : "#f2b661" }}
-                                    />
-                                  </FullscreenNoteWrapper>
-                                );
-                              })}
-                            </div>
-                            )}
-                            {/* Implementation — with mention autocomplete */}
-                            <div>
-                              <label className="font-semibold block mb-1" style={{ color: "var(--color-text-muted)" }}>
-                                Implementation <span className="font-normal" style={{ color: "var(--color-text-muted)", opacity: 0.6 }}>— type ( to reference</span>
-                              </label>
+                            {/* Unified Notes — shared store */}
+                            <FullscreenNoteWrapper label="Notes" platformColor="#5bc0de">
                               <FeatureMentionField
-                                initial={String(row.implementation ?? "")}
-                                initialFmt={(Array.isArray(row.implFmt) ? row.implFmt : []) as FmtRange[]}
-                                onCommit={(text, fmt, collapsed, tables) => {
-                                  const prev = (row.collapsedSections as Record<string, unknown>) ?? {};
-                                  const prevTables = (row.embeddedTables as Record<string, unknown>) ?? {};
-                                  const updated = { ...row, implementation: text || null, implFmt: fmt, ...(collapsed !== undefined ? { collapsedSections: { ...prev, implementation: Object.keys(collapsed).length > 0 ? collapsed : undefined } } : {}), ...(tables !== undefined ? { embeddedTables: { ...prevTables, implementation: Object.keys(tables).length > 0 ? tables : undefined } } : {}) };
-                                  applyLocalUpdate("features", updated, "Inline edit: implementation");
-                                }}
+                                initial={unifiedInitial}
+                                initialFmt={unifiedInitialFmt}
+                                onCommit={(text, fmt, collapsed, tables) => unifiedPersist(text || null, fmt, collapsed, tables)}
                                 tables={mentionTables}
                                 fields={mentionFields}
                                 tableNames={mentionTableNames}
@@ -5483,24 +5405,16 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                 research={mentionResearch}
                                 onRefNavigate={handleRefNav}
                                 onCreateRef={handleCreateRef}
-                                      tableDetails={data.data_tables as Array<Record<string, unknown>>}
-                                      onPickTableForField={openTablePickerForField}
-                                placeholder="Implementation details... type ( to reference a table, field, or image"
-                                initialCollapsed={((row.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {})["implementation"]}
-                                onCollapsedChange={(collapsed) => {
-                                  const prev = (row.collapsedSections as Record<string, unknown>) ?? {};
-                                  const updated = { ...row, collapsedSections: { ...prev, implementation: Object.keys(collapsed).length > 0 ? collapsed : undefined } };
-                                  applyLocalUpdate("features", updated, "Collapse state: implementation");
-                                }}
-                                initialTables={((row.embeddedTables as Record<string, Record<string, unknown>> | null) ?? {})["implementation"] as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined}
-                                onTablesChange={(tbls) => {
-                                  const prev = (row.embeddedTables as Record<string, unknown>) ?? {};
-                                  const updated = { ...row, embeddedTables: { ...prev, implementation: Object.keys(tbls).length > 0 ? tbls : undefined } };
-                                  applyLocalUpdate("features", updated, "Table change: implementation");
-                                }}
-                                noteContext={{ module: section.name || undefined, moduleColor: moduleColColor, feature: String(row.featureName || ""), featureColor: featureColColor, field: "Implementation", fieldColor: "var(--color-text-muted)" }}
+                                tableDetails={data.data_tables as Array<Record<string, unknown>>}
+                                onPickTableForField={openTablePickerForField}
+                                placeholder="Notes — type ( to reference a table, field, module, feature, concept, or image. Use ## headers for per-platform or per-step sections."
+                                initialCollapsed={unifiedInitialCollapsed}
+                                onCollapsedChange={(collapsed) => unifiedPersist(unifiedInitial || null, unifiedInitialFmt, collapsed, unifiedInitialTables)}
+                                initialTables={unifiedInitialTables}
+                                onTablesChange={(tbls) => unifiedPersist(unifiedInitial || null, unifiedInitialFmt, unifiedInitialCollapsed, tbls)}
+                                noteContext={{ module: section.name || undefined, moduleColor: moduleColColor, feature: String(row.featureName || ""), featureColor: featureColColor, field: "Notes", fieldColor: "#5bc0de" }}
                               />
-                            </div>
+                            </FullscreenNoteWrapper>
                             {/* ─── Depended On By ─── */}
                             <DependedOnBySection featureId={row.featureId as number} />
                             {/* ─── Test Cases Grid ─── */}
@@ -5509,50 +5423,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                             <ImplementationStepsGrid featureId={row.featureId as number} featureName={String(row.featureName ?? "")} />
                             {/* ─── Prototypes Grid ─── */}
                             <PrototypesGrid featureId={row.featureId as number} featureName={String(row.featureName ?? "")} allFeatures={(data.features || []).map(f => ({ featureId: f.featureId as number, featureName: String(f.featureName ?? "") }))} />
-                            {/* ─── References (extracted from notes) ─── */}
-                            {(() => {
-                              const notesSections = [
-                                { key: "notes", label: "Web App", text: (row.notes as string) || "" },
-                                { key: "nativeNotes", label: "Native", text: (row.nativeNotes as string) || "" },
-                                { key: "androidNotes", label: "Android", text: (row.androidNotes as string) || "" },
-                                { key: "appleNotes", label: "Apple", text: (row.appleNotes as string) || "" },
-                                { key: "otherNotes", label: "Other", text: (row.otherNotes as string) || "" },
-                              ];
-                              const refs = extractRefsFromNotes(notesSections, resolveTableName, resolveFieldName);
-                              return (
-                                <div>
-                                  <label className="font-semibold block mb-1" style={{ color: "var(--color-text-muted)" }}>References (extracted from notes)</label>
-                                  {refs.length > 0 ? (
-                                    <table className="text-xs" style={{ borderCollapse: "collapse" }}>
-                                      <thead>
-                                        <tr style={{ borderBottom: "1px solid var(--color-divider)" }}>
-                                          <th className="text-left px-2 py-1 w-8" style={{ color: "var(--color-text-muted)" }}>#</th>
-                                          <th className="text-left px-2 py-1 w-16" style={{ color: "var(--color-text-muted)" }}>Type</th>
-                                          <th className="text-left px-2 py-1" style={{ color: "var(--color-text-muted)" }}>Name</th>
-                                          <th className="text-left px-2 py-1" style={{ color: "var(--color-text-muted)" }}>Line</th>
-                                          <th className="text-left px-2 py-1" style={{ color: "var(--color-text-muted)" }}>Source</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {refs.map((ref, idx) => (
-                                          <tr key={`${ref.type}:${ref.name}`} style={{ borderBottom: "1px solid var(--color-divider)" }}>
-                                            <td className="px-2 py-1" style={{ color: "var(--color-text-muted)" }}>{idx + 1}</td>
-                                            <td className="px-2 py-1" style={{ color: ref.type === "Table" ? "#a855f7" : ref.type === "Field" ? "#5bc0de" : "#4ecb71" }}>{ref.type}</td>
-                                            <td className="px-2 py-1" style={{ color: "var(--color-text)" }}>{ref.type === "Image" ? `🎨 ${ref.name}` : ref.name}</td>
-                                            <td className="px-2 py-1" style={{ color: "var(--color-text-muted)" }}>
-                                              {ref.lines.length === 1 ? ref.lines[0] : `${ref.lines.length}(${ref.lines.join(",")})`}
-                                            </td>
-                                            <td className="px-2 py-1" style={{ color: "var(--color-text-muted)" }}>{ref.source}</td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  ) : (
-                                    <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>No references found — type (table_name) in notes to reference tables, fields, or images</span>
-                                  )}
-                                </div>
-                              );
-                            })()}
+                            {/* References panel removed — Dependencies column takes its place. */}
                             {/* ─── Images ─── */}
                             <FeatureImageGallery
                               images={(Array.isArray(row.images) ? row.images : []) as Array<{ id: string; url: string; title: string; createdAt: string }>}
@@ -5887,111 +5758,45 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                             setTablePickerOpen(true);
                                             setInlineNewField({ tableId: 0, featureRow: feat, noteKey: "notes", fieldName: fieldSnakeName, dataType: "Text", isRequired: false, isUnique: false, isForeignKey: false, referencesTable: null, referencesField: null });
                                           };
-                                          const visibleNoteSections = PLATFORM_NOTE_SECTIONS.filter((sec) => {
-                                            if ("showWhenAnyNative" in sec && sec.showWhenAnyNative) return hasAnyNative;
-                                            return sec.platform ? featurePlatforms.has(sec.platform) : false;
-                                          });
-                                          const webAppSec = visibleNoteSections.find((s) => s.key === "notes");
-                                          const otherSections = visibleNoteSections.filter((s) => s.key !== "notes");
+                                          // Unified notes for nested feature rows — mirrors the top-level Features expanded row.
+                                          const fidNestedUnified = feat.featureId as number;
+                                          const nestedCacheKey = noteCacheKey('feature', fidNestedUnified, 'notes');
+                                          const nestedCached = entityNotesCache[nestedCacheKey];
+                                          const nestedInitial = nestedCached?.content ?? '';
+                                          const nestedInitialFmt = (Array.isArray(nestedCached?.notesFmt) ? nestedCached?.notesFmt : []) as FmtRange[];
+                                          const nestedInitialCollapsed = nestedCached?.collapsedSections as Record<string, { body: string; bodyFmt: FmtRange[] }> | undefined;
+                                          const nestedInitialTables = nestedCached?.embeddedTables as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined;
+                                          const nestedPersist = async (
+                                            content: string | null,
+                                            fmt: unknown,
+                                            collapsed: Record<string, unknown> | undefined,
+                                            tables: Record<string, unknown> | undefined,
+                                          ) => {
+                                            try {
+                                              const saved = await saveEntityNote({
+                                                entityType: 'feature',
+                                                entityId: fidNestedUnified,
+                                                noteKey: 'notes',
+                                                content,
+                                                notesFmt: fmt,
+                                                collapsedSections: collapsed ?? {},
+                                                embeddedTables: tables ?? {},
+                                              });
+                                              setEntityNotesCache((prev) => ({ ...prev, [nestedCacheKey]: saved }));
+                                              refreshDependenciesForEntity('feature', fidNestedUnified);
+                                            } catch (err) { console.error('Failed to save feature note:', err); }
+                                          };
+                                          void hasAnyNative; void featurePlatforms;
                                           return (
                                           <tr style={{ backgroundColor: "rgba(91,192,222,0.03)" }}>
                                             <td colSpan={1 + orderedVisibleFeatCols.length} className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
                                               <div className="space-y-3 text-xs">
-                                                {/* Web App Notes — full width */}
-                                                {webAppSec && (
-                                                  <FullscreenNoteWrapper label={webAppSec.label} platformColor={PLATFORM_COLORS["Web App"].text}>
-                                                    <FeatureMentionField
-                                                      initial={String(feat[webAppSec.key] ?? "")}
-                                                      initialFmt={(Array.isArray(feat[webAppSec.fmtKey]) ? feat[webAppSec.fmtKey] : []) as FmtRange[]}
-                                                      onCommit={(text, fmt, collapsed, tables) => {
-                                                        const prev = (feat.collapsedSections as Record<string, unknown>) ?? {};
-                                                        const prevTables = (feat.embeddedTables as Record<string, unknown>) ?? {};
-                                                        const updated = { ...feat, [webAppSec.key]: text || null, [webAppSec.fmtKey]: fmt, ...(collapsed !== undefined ? { collapsedSections: { ...prev, [webAppSec.key]: Object.keys(collapsed).length > 0 ? collapsed : undefined } } : {}), ...(tables !== undefined ? { embeddedTables: { ...prevTables, [webAppSec.key]: Object.keys(tables).length > 0 ? tables : undefined } } : {}) };
-                                                        applyLocalUpdate("features", updated, `Inline edit: ${webAppSec.key}`);
-                                                      }}
-                                                      tables={mentionTables}
-                                                      fields={mentionFields}
-                                                      tableNames={mentionTableNames}
-                                                      fieldDisplayNames={mentionFieldDisplayNames}
-                                                      images={featureImages}
-                                                      modules={mentionModules}
-                                                      features={mentionFeatures}
-                                concepts={mentionConcepts}
-                                research={mentionResearch}
-                                                      onRefNavigate={handleRefNav}
-                                                      onCreateRef={handleCreateRef}
-                                                      tableDetails={data.data_tables as Array<Record<string, unknown>>}
-                                                      onPickTableForField={openTablePickerForField}
-                                                      placeholder={`${webAppSec.label}... type ( to reference a table, field, or image`}
-                                                      initialCollapsed={((feat.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {})[webAppSec.key]}
-                                                      initialTables={((feat.embeddedTables as Record<string, Record<string, unknown>> | null) ?? {})[webAppSec.key] as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined}
-                                                      onTablesChange={(tbls) => {
-                                                        const prev = (feat.embeddedTables as Record<string, unknown>) ?? {};
-                                                        const updated = { ...feat, embeddedTables: { ...prev, [webAppSec.key]: Object.keys(tbls).length > 0 ? tbls : undefined } };
-                                                        applyLocalUpdate("features", updated, `Table change: ${webAppSec.key}`);
-                                                      }}
-                                                      noteContext={{ module: (feat.modules as number[])?.map((mid: number) => { const m = (data.modules || []).find((mm) => mm.moduleId === mid); return m ? String(m.moduleName) : ""; }).filter(Boolean).join(", ") || undefined, moduleColor: moduleColColor, feature: String(feat.featureName || ""), featureColor: featureColColor, field: webAppSec.label, fieldColor: "#4ecb71" }}
-                                                    />
-                                                  </FullscreenNoteWrapper>
-                                                )}
-                                                {/* Other platform notes — 2-column grid */}
-                                                {otherSections.length > 0 && (
-                                                <div className="grid grid-cols-2 gap-4">
-                                                  {otherSections.map((sec) => {
-                                                    const platformColor = sec.platform ? PLATFORM_COLORS[sec.platform] : (sec.key === "nativeNotes" ? { bg: "rgba(242,182,97,0.1)", text: "#f2b661", border: "#f2b66133" } : null);
-                                                    return (
-                                                      <FullscreenNoteWrapper key={sec.key} label={sec.label} platformColor={platformColor?.text || "#f2b661"}>
-                                                        <FeatureMentionField
-                                                          initial={String(feat[sec.key] ?? "")}
-                                                          initialFmt={(Array.isArray(feat[sec.fmtKey]) ? feat[sec.fmtKey] : []) as FmtRange[]}
-                                                          onCommit={(text, fmt, collapsed, tables) => {
-                                                            const prev = (feat.collapsedSections as Record<string, unknown>) ?? {};
-                                                            const prevTables = (feat.embeddedTables as Record<string, unknown>) ?? {};
-                                                            const updated = { ...feat, [sec.key]: text || null, [sec.fmtKey]: fmt, ...(collapsed !== undefined ? { collapsedSections: { ...prev, [sec.key]: Object.keys(collapsed).length > 0 ? collapsed : undefined } } : {}), ...(tables !== undefined ? { embeddedTables: { ...prevTables, [sec.key]: Object.keys(tables).length > 0 ? tables : undefined } } : {}) };
-                                                            applyLocalUpdate("features", updated, `Inline edit: ${sec.key}`);
-                                                          }}
-                                                          tables={mentionTables}
-                                                          fields={mentionFields}
-                                                          tableNames={mentionTableNames}
-                                                          fieldDisplayNames={mentionFieldDisplayNames}
-                                                          images={featureImages}
-                                                          modules={mentionModules}
-                                                          features={mentionFeatures}
-                                concepts={mentionConcepts}
-                                research={mentionResearch}
-                                                          onRefNavigate={handleRefNav}
-                                                          onCreateRef={handleCreateRef}
-                                                          tableDetails={data.data_tables as Array<Record<string, unknown>>}
-                                                          onPickTableForField={openTablePickerForField}
-                                                          placeholder={`${sec.label}... type ( to reference a table, field, or image`}
-                                                          initialCollapsed={((feat.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {})[sec.key]}
-                                                          initialTables={((feat.embeddedTables as Record<string, Record<string, unknown>> | null) ?? {})[sec.key] as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined}
-                                                          onTablesChange={(tbls) => {
-                                                            const prev = (feat.embeddedTables as Record<string, unknown>) ?? {};
-                                                            const updated = { ...feat, embeddedTables: { ...prev, [sec.key]: Object.keys(tbls).length > 0 ? tbls : undefined } };
-                                                            applyLocalUpdate("features", updated, `Table change: ${sec.key}`);
-                                                          }}
-                                                          noteContext={{ feature: String(feat.featureName || ""), featureColor: featureColColor, field: sec.label, fieldColor: sec.platform ? (PLATFORM_COLORS[sec.platform]?.text || "#f2b661") : "#f2b661" }}
-                                                        />
-                                                      </FullscreenNoteWrapper>
-                                                    );
-                                                  })}
-                                                </div>
-                                                )}
-                                                {/* Implementation */}
-                                                <div>
-                                                  <label className="font-semibold block mb-1" style={{ color: "var(--color-text-muted)" }}>
-                                                    Implementation <span className="font-normal" style={{ opacity: 0.6 }}>— type ( to reference</span>
-                                                  </label>
+                                                {/* Unified Notes — shared store */}
+                                                <FullscreenNoteWrapper label="Notes" platformColor="#5bc0de">
                                                   <FeatureMentionField
-                                                    initial={String(feat.implementation ?? "")}
-                                                    initialFmt={(Array.isArray(feat.implFmt) ? feat.implFmt : []) as FmtRange[]}
-                                                    onCommit={(text, fmt, collapsed, tables) => {
-                                                      const prev = (feat.collapsedSections as Record<string, unknown>) ?? {};
-                                                      const prevTables = (feat.embeddedTables as Record<string, unknown>) ?? {};
-                                                      const updated = { ...feat, implementation: text || null, implFmt: fmt, ...(collapsed !== undefined ? { collapsedSections: { ...prev, implementation: Object.keys(collapsed).length > 0 ? collapsed : undefined } } : {}), ...(tables !== undefined ? { embeddedTables: { ...prevTables, implementation: Object.keys(tables).length > 0 ? tables : undefined } } : {}) };
-                                                      applyLocalUpdate("features", updated, "Inline edit: implementation");
-                                                    }}
+                                                    initial={nestedInitial}
+                                                    initialFmt={nestedInitialFmt}
+                                                    onCommit={(text, fmt, collapsed, tables) => nestedPersist(text || null, fmt, collapsed, tables)}
                                                     tables={mentionTables}
                                                     fields={mentionFields}
                                                     tableNames={mentionTableNames}
@@ -5999,23 +5804,20 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                                     images={featureImages}
                                                     modules={mentionModules}
                                                     features={mentionFeatures}
-                                concepts={mentionConcepts}
-                                research={mentionResearch}
+                                                    concepts={mentionConcepts}
+                                                    research={mentionResearch}
                                                     onRefNavigate={handleRefNav}
                                                     onCreateRef={handleCreateRef}
                                                     tableDetails={data.data_tables as Array<Record<string, unknown>>}
                                                     onPickTableForField={openTablePickerForField}
-                                                    placeholder="Implementation details... type ( to reference a table, field, or image"
-                                                    initialCollapsed={((feat.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {})["implementation"]}
-                                                    initialTables={((feat.embeddedTables as Record<string, Record<string, unknown>> | null) ?? {})["implementation"] as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined}
-                                                    onTablesChange={(tbls) => {
-                                                      const prev = (feat.embeddedTables as Record<string, unknown>) ?? {};
-                                                      const updated = { ...feat, embeddedTables: { ...prev, implementation: Object.keys(tbls).length > 0 ? tbls : undefined } };
-                                                      applyLocalUpdate("features", updated, "Table change: implementation");
-                                                    }}
-                                                    noteContext={{ feature: String(feat.featureName || ""), featureColor: featureColColor, field: "Implementation", fieldColor: "var(--color-text-muted)" }}
+                                                    placeholder="Notes — type ( to reference a table, field, module, feature, concept, or image. Use ## headers for per-platform or per-step sections."
+                                                    initialCollapsed={nestedInitialCollapsed}
+                                                    onCollapsedChange={(collapsed) => nestedPersist(nestedInitial || null, nestedInitialFmt, collapsed, nestedInitialTables)}
+                                                    initialTables={nestedInitialTables}
+                                                    onTablesChange={(tbls) => nestedPersist(nestedInitial || null, nestedInitialFmt, nestedInitialCollapsed, tbls)}
+                                                    noteContext={{ module: (feat.modules as number[])?.map((mid: number) => { const m = (data.modules || []).find((mm) => mm.moduleId === mid); return m ? String(m.moduleName) : ""; }).filter(Boolean).join(", ") || undefined, moduleColor: moduleColColor, feature: String(feat.featureName || ""), featureColor: featureColColor, field: "Notes", fieldColor: "#5bc0de" }}
                                                   />
-                                                </div>
+                                                </FullscreenNoteWrapper>
                                                 {/* Depended On By */}
                                                 <DependedOnBySection featureId={fid} />
                                                 {/* Test Cases Grid */}
@@ -6033,50 +5835,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                                     ))}
                                                   </div>
                                                 )}
-                                                {/* References (extracted from notes) */}
-                                                {(() => {
-                                                  const notesSections = [
-                                                    { key: "notes", label: "Web App", text: (feat.notes as string) || "" },
-                                                    { key: "nativeNotes", label: "Native", text: (feat.nativeNotes as string) || "" },
-                                                    { key: "androidNotes", label: "Android", text: (feat.androidNotes as string) || "" },
-                                                    { key: "appleNotes", label: "Apple", text: (feat.appleNotes as string) || "" },
-                                                    { key: "otherNotes", label: "Other", text: (feat.otherNotes as string) || "" },
-                                                  ];
-                                                  const refs = extractRefsFromNotes(notesSections, resolveTableName, resolveFieldName, resolveModuleName, resolveFeatureName);
-                                                  return (
-                                                    <div>
-                                                      <label className="font-semibold block mb-1" style={{ color: "var(--color-text-muted)" }}>References (extracted from notes)</label>
-                                                      {refs.length > 0 ? (
-                                                        <table className="text-xs" style={{ borderCollapse: "collapse" }}>
-                                                          <thead>
-                                                            <tr style={{ borderBottom: "1px solid var(--color-divider)" }}>
-                                                              <th className="text-left px-2 py-1 w-8" style={{ color: "var(--color-text-muted)" }}>#</th>
-                                                              <th className="text-left px-2 py-1 w-16" style={{ color: "var(--color-text-muted)" }}>Type</th>
-                                                              <th className="text-left px-2 py-1" style={{ color: "var(--color-text-muted)" }}>Name</th>
-                                                              <th className="text-left px-2 py-1" style={{ color: "var(--color-text-muted)" }}>Line</th>
-                                                              <th className="text-left px-2 py-1" style={{ color: "var(--color-text-muted)" }}>Source</th>
-                                                            </tr>
-                                                          </thead>
-                                                          <tbody>
-                                                            {refs.map((ref, idx) => (
-                                                              <tr key={`${ref.type}:${ref.name}`} style={{ borderBottom: "1px solid var(--color-divider)" }}>
-                                                                <td className="px-2 py-1" style={{ color: "var(--color-text-muted)" }}>{idx + 1}</td>
-                                                                <td className="px-2 py-1" style={{ color: ref.type === "Table" ? "#a855f7" : ref.type === "Field" ? "#5bc0de" : ref.type === "Module" ? "#e67d4a" : ref.type === "Feature" ? "#a855f7" : "#4ecb71" }}>{ref.type}</td>
-                                                                <td className="px-2 py-1" style={{ color: "var(--color-text)" }}>{ref.type === "Image" ? `🎨 ${ref.name}` : ref.name}</td>
-                                                                <td className="px-2 py-1" style={{ color: "var(--color-text-muted)" }}>
-                                                                  {ref.lines.length === 1 ? ref.lines[0] : `${ref.lines.length}(${ref.lines.join(",")})`}
-                                                                </td>
-                                                                <td className="px-2 py-1" style={{ color: "var(--color-text-muted)" }}>{ref.source}</td>
-                                                              </tr>
-                                                            ))}
-                                                          </tbody>
-                                                        </table>
-                                                      ) : (
-                                                        <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>No references found — type (table_name) in notes to reference tables, fields, or images</span>
-                                                      )}
-                                                    </div>
-                                                  );
-                                                })()}
+                                                {/* References panel removed — Dependencies column takes its place. */}
                                                 {/* Images */}
                                                 <FeatureImageGallery
                                                   images={(Array.isArray(feat.images) ? feat.images : []) as Array<{ id: string; url: string; title: string; createdAt: string }>}

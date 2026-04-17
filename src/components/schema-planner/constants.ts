@@ -43,12 +43,8 @@ export const TABLE_CONFIGS: Record<string, TableConfig> = {
       { key: "featureTags", label: "Tags", type: "tags", tooltip: "Freeform tags for categorization and filtering" },
       { key: "dataTables", label: "Data Tables", type: "multi-fk", fkTable: "data_tables", fkId: "tableId", fkName: "tableName", hideInGrid: true, hideInModal: true, tooltip: "Tables this feature depends on (auto-extracted from notes)" },
       { key: "dataFields", label: "Data Fields", type: "multi-fk", fkTable: "data_fields", fkId: "fieldId", fkName: "fieldName", hideInGrid: true, hideInModal: true, tooltip: "Fields this feature depends on (auto-extracted from notes)" },
-      { key: "notes", label: "Web App Notes", type: "textarea", hideInGrid: true, tooltip: "Implementation notes for the web app version" },
-      { key: "nativeNotes", label: "Native Notes", type: "textarea", hideInGrid: true, tooltip: "Shared notes for all native platforms" },
-      { key: "androidNotes", label: "Android Notes", type: "textarea", hideInGrid: true, tooltip: "Android-specific implementation notes" },
-      { key: "appleNotes", label: "Apple Notes", type: "textarea", hideInGrid: true, tooltip: "Apple/iOS-specific implementation notes" },
-      { key: "otherNotes", label: "Other Notes", type: "textarea", hideInGrid: true, tooltip: "Notes for other platforms" },
-      { key: "implementation", label: "Implementation", type: "textarea", hideInGrid: true, tooltip: "How this feature will be built — architecture, approach" },
+      { key: "notes", label: "Notes", type: "notes", tooltip: "Unified rich notes — click to open fullscreen editor. Use ## headers for sections (Web App, Native, Android, Apple, Other, Implementation)." },
+      { key: "notes_deps", label: "Notes Dependencies", type: "dependencies", hideInGrid: true, hideInModal: true, tooltip: "References extracted from notes with per-ref rationale" },
       { key: "images", label: "Images", type: "image-carousel", hideInModal: true, tooltip: "Click to view and manage images" },
       { key: "_testCount", label: "Tests", type: "test-count", hideInModal: true, tooltip: "Click to view and manage test cases" },
       { key: "_projectRefs", label: "Projects", type: "ref-projects", badge: "calc", badgeTooltip: "Computed from code change dependencies", tooltip: "Projects that reference this feature via code change dependencies" },
@@ -446,14 +442,6 @@ export const TAG_TIER_COLORS: Record<number, { bg: string; text: string; border:
   2: { bg: "rgba(108,123,255,0.12)", text: "#6c7bff", border: "rgba(108,123,255,0.3)" },
 };
 
-// Map of platform note field keys to their label and which platform triggers visibility
-export const PLATFORM_NOTE_SECTIONS = [
-  { key: "notes", fmtKey: "notesFmt", label: "Web App Notes", platform: "Web App" },
-  { key: "nativeNotes", fmtKey: "nativeNotesFmt", label: "Native Notes", platform: null, showWhenAnyNative: true },
-  { key: "androidNotes", fmtKey: "androidNotesFmt", label: "Android Notes", platform: "Android" },
-  { key: "appleNotes", fmtKey: "appleNotesFmt", label: "Apple Notes", platform: "Apple" },
-  { key: "otherNotes", fmtKey: "otherNotesFmt", label: "Other Notes", platform: "Other" },
-] as const;
 
 export const OWNERSHIP_OPTIONS = [
   { value: "org_private", label: "Org Private — rows belong to one org, invisible to others", example: "tools, processes, projects" },

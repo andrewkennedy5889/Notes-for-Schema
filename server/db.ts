@@ -530,6 +530,47 @@ function initSchema(db: Database.Database) {
     txn(concepts);
   } catch { /* concepts table may not exist on first run */ }
 
+  // ─── Backfill _splan_entity_notes from existing feature notes (idempotent) ───
+  // Per PRD D3, the 5 per-platform notes + implementation merge into ONE unified note
+  // with section headers. Formatting ranges (notes_fmt, native_notes_fmt, etc.) cannot be
+  // trivially combined after concatenation, so they reset to [] — documented as a known loss.
+  // Source columns remain populated; dropping them is a future cleanup phase.
+  try {
+    const features = db.prepare(
+      "SELECT feature_id, notes, native_notes, android_notes, apple_notes, other_notes, implementation, collapsed_sections, embedded_tables FROM _splan_features"
+    ).all() as Array<Record<string, unknown>>;
+    const insertFeatureNote = db.prepare(
+      "INSERT OR IGNORE INTO _splan_entity_notes (entity_type, entity_id, note_key, content, notes_fmt, collapsed_sections, embedded_tables) VALUES ('feature', ?, 'notes', ?, '[]', ?, ?)"
+    );
+    const txn = db.transaction((rows: typeof features) => {
+      for (const r of rows) {
+        const webApp = String(r.notes ?? '').trim();
+        const native = String(r.native_notes ?? '').trim();
+        const android = String(r.android_notes ?? '').trim();
+        const apple = String(r.apple_notes ?? '').trim();
+        const other = String(r.other_notes ?? '').trim();
+        const impl = String(r.implementation ?? '').trim();
+        const sections: string[] = [];
+        if (webApp) sections.push(`## Web App Notes\n${webApp}`);
+        if (native) sections.push(`## Native Notes\n${native}`);
+        if (android) sections.push(`## Android Notes\n${android}`);
+        if (apple) sections.push(`## Apple Notes\n${apple}`);
+        if (other) sections.push(`## Other Notes\n${other}`);
+        if (impl) sections.push(`## Implementation\n${impl}`);
+        if (sections.length === 0) continue; // nothing worth migrating
+        const merged = sections.join('\n\n');
+        insertFeatureNote.run(
+          r.feature_id,
+          merged,
+          // Reset collapsed/tables to empty since per-section keys don't map across the merge.
+          '{}',
+          '{}'
+        );
+      }
+    });
+    txn(features);
+  } catch { /* features table may not exist on first run */ }
+
   // ─── Apply user-defined columns from _splan_column_defs ───
   const ENTITY_SQL_TABLE: Record<string, string> = {
     modules: '_splan_modules', features: '_splan_features', concepts: '_splan_concepts',
