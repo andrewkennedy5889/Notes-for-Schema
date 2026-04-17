@@ -473,7 +473,7 @@ app.get('/api/schema-planner/notes', (req: Request, res: Response) => {
   }
 
   const entityId = Number(entityIdRaw);
-  if (!entityId) return void res.status(400).json({ error: 'entityId must be a number' });
+  if (!Number.isFinite(entityId) || entityId <= 0) return void res.status(400).json({ error: 'entityId must be a positive number (unsaved rows cannot have notes)' });
 
   if (noteKey) {
     const row = db.prepare(
@@ -499,7 +499,8 @@ app.put('/api/schema-planner/notes', (req: Request, res: Response) => {
     embeddedTables?: unknown;
     reasoning?: string;
   };
-  if (!entityType || !entityId) return void res.status(400).json({ error: 'entityType and entityId required' });
+  if (!entityType) return void res.status(400).json({ error: 'entityType required' });
+  if (!Number.isFinite(entityId) || entityId <= 0) return void res.status(400).json({ error: 'entityId must be a positive number (unsaved rows cannot have notes)' });
 
   const db = getDb();
   const existing = db.prepare(
@@ -558,7 +559,8 @@ app.delete('/api/schema-planner/notes', (req: Request, res: Response) => {
     entityId: number;
     noteKey?: string;
   };
-  if (!entityType || !entityId) return void res.status(400).json({ error: 'entityType and entityId required' });
+  if (!entityType) return void res.status(400).json({ error: 'entityType required' });
+  if (!Number.isFinite(entityId) || entityId <= 0) return void res.status(400).json({ error: 'entityId must be a positive number' });
   const db = getDb();
   if (noteKey) {
     db.prepare('DELETE FROM _splan_entity_notes WHERE entity_type = ? AND entity_id = ? AND note_key = ?')

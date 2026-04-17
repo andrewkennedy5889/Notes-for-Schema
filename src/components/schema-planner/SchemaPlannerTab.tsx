@@ -3334,14 +3334,22 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
         const tabCfg = TABLE_CONFIGS[subTab];
         const eid = tabCfg?.idKey ? (row[tabCfg.idKey] as number) : 0;
         const entityType = tabCfg?.entityType || subTab;
+        // Unsaved rows carry a negative tempId (see applyLocalCreate). Writing notes against a
+        // tempId would orphan _splan_entity_notes rows, so block the click until the row is saved.
+        const isUnsaved = !eid || eid <= 0;
         // Prefer cache (shared store), fall back to row value (legacy concepts.notes during transition)
         const cached = entityNotesCache[noteCacheKey(entityType, eid, col.key)];
         const displayValue = cached?.content ?? value;
         return (
           <span
-            className="cursor-pointer hover:bg-black/5 rounded px-0.5 -mx-0.5 block min-h-[1.2em]"
-            onClick={(e) => { e.stopPropagation(); setFullscreenNote({ row, tabKey: subTab, noteKey: col.key }); }}
-            title="Click to open notes"
+            className={isUnsaved ? "px-0.5 -mx-0.5 block min-h-[1.2em]" : "cursor-pointer hover:bg-black/5 rounded px-0.5 -mx-0.5 block min-h-[1.2em]"}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isUnsaved) return;
+              setFullscreenNote({ row, tabKey: subTab, noteKey: col.key });
+            }}
+            style={isUnsaved ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
+            title={isUnsaved ? "Save this row first before adding notes" : "Click to open notes"}
           >
             {renderCell(col, displayValue)}
           </span>
