@@ -1435,6 +1435,7 @@ app.post('/api/notebook', (req: Request, res: Response) => {
     'INSERT INTO _splan_notebook (title, content_html) VALUES (?, ?)'
   ).run(title || 'Untitled', content_html || '');
   const row = db.prepare('SELECT * FROM _splan_notebook WHERE id = ?').get(result.lastInsertRowid);
+  logChange({ entityType: 'notebook', entityId: result.lastInsertRowid as number, action: 'INSERT', newValue: title || 'Untitled' });
   return void res.json(row);
 });
 
@@ -1452,12 +1453,17 @@ app.put('/api/notebook/:id', (req: Request, res: Response) => {
   vals.push(id);
   db.prepare(`UPDATE _splan_notebook SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
   const row = db.prepare('SELECT * FROM _splan_notebook WHERE id = ?').get(id);
+  // Log content changes (but not every keystroke detail — just that it changed)
+  if (title !== undefined) logChange({ entityType: 'notebook', entityId: id, action: 'UPDATE', fieldChanged: 'title', newValue: title });
+  if (content_html !== undefined) logChange({ entityType: 'notebook', entityId: id, action: 'UPDATE', fieldChanged: 'content_html' });
   return void res.json(row);
 });
 
 app.delete('/api/notebook/:id', (req: Request, res: Response) => {
   const db = getDb();
+  const existing = db.prepare('SELECT title FROM _splan_notebook WHERE id = ?').get(parseInt(req.params.id, 10)) as { title: string } | undefined;
   db.prepare('DELETE FROM _splan_notebook WHERE id = ?').run(parseInt(req.params.id, 10));
+  logChange({ entityType: 'notebook', entityId: parseInt(req.params.id, 10), action: 'DELETE', oldValue: existing?.title });
   return void res.json({ success: true });
 });
 
