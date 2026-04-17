@@ -61,6 +61,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   // and is polled cross-origin by the local instance to detect when a deploy lands.
   if (req.path === '/api/version') return next();
 
+  // Scheduled-agent work endpoints are gated by SCHEDULED_AGENT_TOKEN via
+  // requireScheduledToken downstream — the cron-fired Claude session has no
+  // app session cookie, only the bearer token.
+  if (req.path.startsWith('/api/agents/work/')) return next();
+
   const token = getCookie(req, COOKIE_NAME);
   const expected = makeToken(AUTH_PASSWORD);
 
