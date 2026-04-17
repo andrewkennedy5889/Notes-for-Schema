@@ -51,7 +51,7 @@ app.get('/api/config', (_req: Request, res: Response) => {
   return void res.json({ mode: getAppMode() });
 });
 
-app.get('/api/claude-md-stats', (_req: Request, res: Response) => {
+app.get('/api/claude-md-stats', requireLocal, (_req: Request, res: Response) => {
   const filePath = path.join(process.cwd(), 'CLAUDE.md');
   try {
     const stat = fs.statSync(filePath);
