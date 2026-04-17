@@ -6,6 +6,54 @@
 
 ---
 
+## 0. How to execute this PRD
+
+### 0.1 Execution mode
+
+Implement **pure-code phases** (2, 3, 4, 5, 7, 8) end-to-end on a single branch. Stop and hand back to the user at every `[REQUIRES USER]` checkpoint. Do **not** attempt infrastructure actions (Railway volume, Railway env vars, cron migrations) yourself — those are user-driven.
+
+§12 "Rollout" describes a multi-week soak with 48h observation gates. **Ignore that for session execution.** Land all implemented phases on one branch with logical per-phase commits; the user will handle soak, feature-flag flipping, and production cutover manually after review.
+
+### 0.2 Per-phase user checkpoints
+
+| Phase | Who executes | Why |
+|---|---|---|
+| 1 — Railway volume | **User** | Requires Railway CLI + account access to create a mounted volume. |
+| 2 — `_splan_scheduled_runs` table | Agent | Pure migration in `server/db.ts`. |
+| 3 — Schema fingerprint pinning | Agent | Pure code. |
+| 4 — `run-scheduled` endpoint | Agent | Pure code. |
+| 5 — Concept Researcher handler | Agent | Pure code, **but** verify preconditions first (see Phase 5 checklist). |
+| 6 — Rewrite cron prompt + migrate existing schedules | **User** | Requires `claude schedule` CLI against Anthropic's cloud; deleting/recreating live triggers is a destructive act that should be driven by a human. |
+| 7 — Departure gate | Agent | Pure React in `SchemaPlanner.tsx`. |
+| 8 — Auto-pull + history panel | Agent | Pure code. |
+
+### 0.3 Commit conventions
+
+One commit per phase. Message format: `phase-N: <short summary>` (e.g., `phase-2: add _splan_scheduled_runs table`). Matches the terseness of recent project history without adopting conventional-commits prefixes.
+
+### 0.4 Hard constraints (do not violate)
+
+- **Do not touch `POST /api/agents/launch`** (server/index.ts:1383) or any path exercised by the on-demand Launch button. Goal #7 is that the interactive path stays identical.
+- **Do not modify the `/schema` skill** at `~/.claude/skills/schema/skill.md`. It stays stdio-only for interactive use. This PRD's solution routes around it, not through it.
+- **Do not add backwards-compat shims** for the old prompt-based scheduled flow. Per `CLAUDE.md`, delete cleanly; the §12 migration flag is the only transitional affordance.
+- **Do not run `claude schedule delete` on existing live triggers** — the user handles that as part of Phase 6.
+
+### 0.5 Testing the running app
+
+Use the `schema-planner-start` skill (available in this environment) to start the Vite + Express dev stack rather than invoking `npm run dev` manually. Run `npm test` (Vitest) after each phase; the project has a 15s per-test timeout and runs in the node environment.
+
+For UI changes (Phase 7, Phase 8), per `CLAUDE.md` you must drive the feature in a browser before claiming done. If you cannot (no browser access in this environment), say so explicitly in the handoff note rather than claiming success.
+
+### 0.6 When to stop and ask
+
+- If `_splan_research` or `_splan_concepts` tables don't exist when you reach Phase 5 (see Phase 5 precondition check).
+- If the Anthropic SDK is not present in `package.json` server-side dependencies.
+- If any `[REQUIRES USER]` marker is encountered and skipping it would block subsequent phases.
+- If the project's `getSchemaTables()` helper (referenced in §5.2 and §6.3) is not found where expected.
+- If a test you write fails for a reason you can't diagnose in under 10 minutes.
+
+---
+
 ## 1. Context for a fresh session
 
 ### 1.1 Project
@@ -158,15 +206,20 @@ The on-demand interactive flow stays prompt-driven and uses `/schema`. Scheduled
 
 Each phase is independently shippable and each makes the next safer.
 
-### Phase 1 — Railway SQLite volume (infra prereq)
+### Phase 1 — Railway SQLite volume (infra prereq)   `[REQUIRES USER]`
 
 **Why first**: nothing else matters if deploys keep wiping research output.
 
-- Add a Railway volume mounted at `/app/data`.
+**User steps** (do not attempt from the agent session):
+
+- Create a Railway volume mounted at `/app/data`.
+- Set `DB_PATH=/app/data/schema.db` as a Railway env var on the `notes-for-schema-production` service.
+- Deploy twice back-to-back and confirm row counts survive (`SELECT COUNT(*) FROM _splan_features` before/after).
+
+**Agent-side code change** (safe to do in the same branch as Phases 2–5):
+
 - Change DB path in `server/db.ts` to `process.env.DB_PATH ?? path.join(__dirname, '../data/schema.db')`.
-- Set `DB_PATH=/app/data/schema.db` as a Railway env var.
-- Update `Dockerfile` to not bake a DB into the image.
-- Manual verification: deploy twice back-to-back, confirm row counts survive.
+- Audit `Dockerfile` to confirm no DB is baked into the image. If one is, remove it.
 
 **Acceptance**: after `git push → Railway redeploy`, `SELECT COUNT(*) FROM _splan_features` on Railway returns the pre-deploy value.
 
@@ -242,22 +295,38 @@ app.post('/api/agents/run-scheduled/:agentId', requireScheduledToken, async (req
 
 ### Phase 5 — First handler: `scheduled-agents/concept-researcher.ts`
 
-Server-side port of the current Concept Researcher prompt. Uses:
+**Preconditions (verify before coding — stop and ask if any fail):**
 
-- `getDb().prepare('SELECT * FROM _splan_concepts WHERE status = ? ORDER BY updated_at ASC LIMIT ?')` for concept selection.
-- Anthropic SDK with `web_search_20250305` tool for research.
-- Model: `claude-opus-4-7` per `CLAUDE.md` default. Prompt caching enabled on the concept-context block.
-- Writes to `_splan_research` and appends `(r:<id>:<title>)` to concept notes exactly as the current prompt does.
+- `_splan_concepts` table exists with at least `id`, `status`, `updated_at`, `notes` columns. Run `SELECT name FROM sqlite_master WHERE type='table' AND name='_splan_concepts'`.
+- `_splan_research` table exists with the columns the current prompt expects: `title`, `concept_id`, `summary`, `findings`, `sources` (JSON), `status`. If it does not exist, stop — do not guess at the schema. Ask the user whether to add a migration.
+- `@anthropic-ai/sdk` is present in `package.json` dependencies. If not, stop and ask before adding it.
+- `getSchemaTables()` helper exists in `server/index.ts`. If not in `server/index.ts`, search `server/utils.ts` and `server/db.ts` before concluding it's missing.
 
-Requires `ANTHROPIC_API_KEY` env var on Railway.
+**Server-side port of the current Concept Researcher prompt:**
 
-### Phase 6 — Rewrite the cron prompt
+- `getDb().prepare('SELECT * FROM _splan_concepts WHERE status = ? ORDER BY updated_at ASC LIMIT ?')` for concept selection (or omit the `status` filter for `status='all'`).
+- Anthropic SDK client configured with `process.env.ANTHROPIC_API_KEY`. Use the `claude-api` skill in this environment — invoke it before writing the SDK integration so you pick up current best practices (prompt caching, tool shape, error handling).
+- Web search: use Anthropic's server-side web search tool. **Verify the current tool type string** against Anthropic docs at coding time (e.g., `web_search_20250305` may have been superseded — the `claude-api` skill's guidance is authoritative).
+- Model: `claude-opus-4-7` per `CLAUDE.md`. Enable prompt caching on the concept-context block (the per-concept description + existing notes) since it's reused across multiple research cycles.
+- Writes to `_splan_research` and appends `(r:<id>:<title>)` to concept notes exactly as the current prompt does. Wrap all writes for one run inside a single `db.transaction(() => { ... })()` so a mid-run failure rolls back cleanly.
+- Retry the Anthropic SDK call with exponential backoff (3 attempts, 1s/2s/4s) on transient errors; log the final failure to `_splan_scheduled_runs.result_json` rather than throwing so the run is still recorded.
 
-On next schedule create, the prompt sent to `claude schedule create` becomes:
+**Requires** `ANTHROPIC_API_KEY` env var on Railway `[REQUIRES USER]` — set this during Phase 1 user steps if not already present.
+
+### Phase 6 — Rewrite the cron prompt   `[REQUIRES USER]` for live-trigger migration
+
+**Agent-side code change** (safe in session):
+
+- Update the `scheduleCmd` construction in `POST /api/agents/schedules` (server/index.ts ~line 1503) so that new schedules use the thin-invoker prompt shape:
 
 > *"POST to https://notes-for-schema-production.up.railway.app/api/agents/run-scheduled/concept-researcher with header `Authorization: Bearer {TOKEN}` and empty body. Print the JSON response. If `ran: false`, the response explains why."*
 
-Existing schedules must be migrated: on server startup, any schedule whose `triggerId` doesn't have the new prompt shape gets its trigger deleted and recreated. Gated behind a migration flag `schedules.v2` stored in `.splan/migrations-applied.json`.
+- Add a migration-marker file helper at `.splan/migrations-applied.json` (create if missing) with key `schedules.v2: true` so repeat runs don't re-migrate.
+
+**User steps** (do not attempt from agent session):
+
+- After the code is deployed, run `npm run migrate-schedules-v2` (new script to be added; see below) which iterates `.splan/agent-schedules.json`, calls `claude schedule delete <oldTriggerId>` and re-creates each with the new prompt shape. This touches live Anthropic cloud triggers and is destructive — user drives it.
+- Agent should scaffold the script but **leave it opt-in**: no auto-migration on server boot. The PRD's original "auto-migrate on boot" proposal is withdrawn — too surprising for a production service.
 
 ### Phase 7 — Departure gate UX
 
@@ -379,19 +448,31 @@ All three documented in `README.md` deployment section.
 
 ---
 
-## 12. Rollout
+## 12. Rollout (reference only — not executed in the implementing session)
 
-1. Phase 1 (volume) shipped alone and verified for 48h.
-2. Phases 2–5 shipped together behind a feature flag `FEATURE_SCHEDULED_AGENTS_V2=true` in Railway env. Existing schedules untouched.
-3. With flag on in staging, manually migrate one schedule (Concept Researcher) via §6 migration code path. Observe for 48h.
-4. Phases 6–8 (UI) shipped with the flag still gating the cron prompt shape. UI shows history panel for migrated schedules only.
-5. Once stable, remove the flag. Migrate any remaining schedules automatically on server boot.
+> **Session-execution note (see §0):** Do **not** try to soak, observe, or cut over. Land all pure-code phases on one branch with clean per-phase commits and stop. The user drives the rollout sequence below manually post-merge.
+
+1. Merge the branch to `main` so Phase 1 code changes (DB path env var) ship first. User creates the Railway volume and sets `DB_PATH` before the deploy lands.
+2. After volume is confirmed (two successful deploys with persistent rows), user runs `npm run migrate-schedules-v2` (scaffolded in Phase 6) to cut existing schedules over to the thin-invoker prompt.
+3. User watches `_splan_scheduled_runs` overnight; confirms success rows for the first two firings.
+4. User toggles `enforceSyncBeforeClose` setting on (defaults on) and validates the departure gate in real use.
+
+No feature flag. The original `FEATURE_SCHEDULED_AGENTS_V2` gate proposed in an earlier draft is withdrawn — cleaner to roll forward.
 
 ---
 
-## 13. Open questions for the implementing session
+## 13. Open questions
 
-- Does `claude schedule create` currently support ad-hoc test fires via CLI, or does testing require waiting for cron? (Affects the test plan.)
-- Should `_splan_scheduled_runs` be pruned? Propose: keep last 90 days, same as `agent-history.json`.
-- Is the Anthropic SDK server-side call allowed to consume tokens on a Railway bill, or does the user want the cost accounted separately? (Operational; doesn't block implementation.)
-- When a schedule is repinned, should historical runs be re-labeled with the new expected hash, or stay with the hash at time of firing? Propose: stay — history reflects reality.
+**Pre-answered (implement per the proposal — no need to ask):**
+
+- **Pruning**: `_splan_scheduled_runs` keeps last 90 days, matching `agent-history.json`. Add prune-on-read in the GET endpoint just like `agent-history.json` does today.
+- **Repin + history**: historical runs keep the hash they fired against. History reflects reality.
+
+**Deferred — decide during code, don't block on them:**
+
+- **Ad-hoc test fires**: if `claude schedule create --run-now` or equivalent isn't available on the installed CLI version, test via `curl` against the local Express server with `SCHEDULED_AGENT_TOKEN` set in `.env`. Document whichever worked in the handoff note.
+
+**User decisions — skip in session, flag in handoff:**
+
+- **Anthropic SDK cost accounting** — operational question, not code. Do not ask mid-session.
+- **Whether to also expose on-demand runs against Railway** (the symmetric "cloud launch" button) — explicitly out of scope for this PRD, but worth flagging in the handoff so the user knows it's the natural next step.
