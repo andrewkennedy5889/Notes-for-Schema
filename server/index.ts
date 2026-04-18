@@ -1848,6 +1848,132 @@ function readJson<T>(filePath: string, fallback: T): T {
   try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch { return fallback; }
 }
 
+// ─── Agent-schedule SQL helpers (Option D: schedules live in DB, not file) ───
+// Rows live in _splan_agent_schedules and round-trip through push/pull, so
+// Railway learns about new schedules on the next sync. Callers get/store
+// camelCase records so the UI + cron-Claude prompt builder keep the same shape
+// that agent-schedules.json used to expose.
+
+type ScheduleRecord = {
+  agentId: string;
+  cronExpression: string;
+  cronLabel: string;
+  promptOverride?: string | null;
+  paramDefaults: Record<string, unknown>;
+  triggerId: string;
+  enabled: boolean;
+  createdAt: string;
+  cliOutput: string;
+  cliError?: string | null;
+  unregistered: boolean;
+  expectedSchemaFingerprint?: string | null;
+  pinnedAt?: string | null;
+  promptSnapshot: string;
+  promptSnapshotAt?: string | null;
+};
+
+function readAllSchedules(): Record<string, ScheduleRecord> {
+  const db = getDb();
+  const rows = db.prepare('SELECT * FROM _splan_agent_schedules').all() as Array<Record<string, unknown>>;
+  const out: Record<string, ScheduleRecord> = {};
+  for (const row of rows) {
+    const parsed = parseRow(row) as Record<string, unknown>;
+    const agentId = parsed.agentId as string;
+    out[agentId] = parsed as unknown as ScheduleRecord;
+  }
+  return out;
+}
+
+function loadSchedule(agentId: string): ScheduleRecord | null {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM _splan_agent_schedules WHERE agent_id = ?').get(agentId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return parseRow(row) as unknown as ScheduleRecord;
+}
+
+function upsertSchedule(rec: ScheduleRecord): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO _splan_agent_schedules
+       (agent_id, cron_expression, cron_label, prompt_override, param_defaults,
+        trigger_id, enabled, created_at, cli_output, cli_error, unregistered,
+        expected_schema_fingerprint, pinned_at, prompt_snapshot, prompt_snapshot_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(agent_id) DO UPDATE SET
+       cron_expression             = excluded.cron_expression,
+       cron_label                  = excluded.cron_label,
+       prompt_override             = excluded.prompt_override,
+       param_defaults              = excluded.param_defaults,
+       trigger_id                  = excluded.trigger_id,
+       enabled                     = excluded.enabled,
+       created_at                  = excluded.created_at,
+       cli_output                  = excluded.cli_output,
+       cli_error                   = excluded.cli_error,
+       unregistered                = excluded.unregistered,
+       expected_schema_fingerprint = excluded.expected_schema_fingerprint,
+       pinned_at                   = excluded.pinned_at,
+       prompt_snapshot             = excluded.prompt_snapshot,
+       prompt_snapshot_at          = excluded.prompt_snapshot_at`
+  ).run(
+    rec.agentId,
+    rec.cronExpression,
+    rec.cronLabel,
+    rec.promptOverride ?? null,
+    JSON.stringify(rec.paramDefaults ?? {}),
+    rec.triggerId,
+    rec.enabled ? 1 : 0,
+    rec.createdAt,
+    rec.cliOutput ?? '',
+    rec.cliError ?? null,
+    rec.unregistered ? 1 : 0,
+    rec.expectedSchemaFingerprint ?? null,
+    rec.pinnedAt ?? null,
+    rec.promptSnapshot ?? '',
+    rec.promptSnapshotAt ?? null,
+  );
+}
+
+function deleteScheduleRow(agentId: string): void {
+  const db = getDb();
+  db.prepare('DELETE FROM _splan_agent_schedules WHERE agent_id = ?').run(agentId);
+}
+
+// One-time import: on boot, if the legacy file still exists and the new table
+// is empty, pull the file rows in so nothing is lost for users upgrading.
+function importSchedulesFromFileIfEmpty(): void {
+  try {
+    const db = getDb();
+    const count = (db.prepare('SELECT COUNT(*) AS c FROM _splan_agent_schedules').get() as { c: number }).c;
+    if (count > 0) return;
+    if (!fs.existsSync(AGENT_SCHEDULES_FILE)) return;
+    const raw = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
+    const entries = Object.entries(raw);
+    if (entries.length === 0) return;
+    for (const [agentId, s] of entries) {
+      upsertSchedule({
+        agentId,
+        cronExpression: String(s.cronExpression ?? ''),
+        cronLabel: String(s.cronLabel ?? ''),
+        promptOverride: (s.promptOverride as string | undefined) ?? null,
+        paramDefaults: (s.paramDefaults as Record<string, unknown>) ?? {},
+        triggerId: String(s.triggerId ?? ''),
+        enabled: s.enabled !== false,
+        createdAt: String(s.createdAt ?? new Date().toISOString()),
+        cliOutput: String(s.cliOutput ?? ''),
+        cliError: (s.cliError as string | undefined) ?? null,
+        unregistered: s.unregistered === true,
+        expectedSchemaFingerprint: (s.expectedSchemaFingerprint as string | undefined) ?? null,
+        pinnedAt: (s.pinnedAt as string | undefined) ?? null,
+        promptSnapshot: String(s.promptSnapshot ?? ''),
+        promptSnapshotAt: (s.promptSnapshotAt as string | undefined) ?? null,
+      });
+    }
+    console.log(`[schedules] imported ${entries.length} schedule(s) from agent-schedules.json into _splan_agent_schedules`);
+  } catch (e) {
+    console.warn('[schedules] import from file failed:', (e as Error).message);
+  }
+}
+
 function generateRunId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).substring(2, 6);
@@ -1957,7 +2083,7 @@ app.put('/api/agents/results/:runId', (req: Request, res: Response) => {
 
 // GET /api/agents/schedules — read all saved schedules
 app.get('/api/agents/schedules', (_req: Request, res: Response) => {
-  return void res.json(readJson<Record<string, unknown>>(AGENT_SCHEDULES_FILE, {}));
+  return void res.json(readAllSchedules());
 });
 
 // Resolve the remote URL cron-Claude will call back into. Prefer an explicit
@@ -2033,26 +2159,24 @@ app.post('/api/agents/schedules', async (req: Request, res: Response) => {
   const scheduleCmd = `claude schedule create --name "${(agentName || agentId).replace(/"/g, '')}" --cron "${config.cronExpression}" --prompt "${safePrompt}"`;
 
   const persistSchedule = (triggerId: string, opts: { unregistered: boolean; cliOutput?: string; cliError?: string }) => {
-    ensureSplanDir();
-    const schedules = readJson<Record<string, unknown>>(AGENT_SCHEDULES_FILE, {});
     const nowIso = new Date().toISOString();
-    schedules[agentId] = {
+    upsertSchedule({
+      agentId,
       cronExpression: config.cronExpression,
       cronLabel: config.cronLabel,
-      promptOverride: config.promptOverride,
-      paramDefaults: config.paramDefaults,
+      promptOverride: config.promptOverride ?? null,
+      paramDefaults: (config.paramDefaults as Record<string, unknown>) ?? {},
       triggerId,
       enabled: true,
       createdAt: nowIso,
       cliOutput: opts.cliOutput ?? '',
-      cliError: opts.cliError,
+      cliError: opts.cliError ?? null,
       unregistered: opts.unregistered,
       expectedSchemaFingerprint: computeSchemaFingerprint(),
       pinnedAt: nowIso,
       promptSnapshot: prompt,
       promptSnapshotAt: nowIso,
-    };
-    fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+    });
   };
 
   exec(scheduleCmd, { shell: 'cmd.exe', cwd: PROJECT_DIR }, (err, stdout, stderr) => {
@@ -2084,14 +2208,11 @@ app.post('/api/agents/schedules', async (req: Request, res: Response) => {
 // POST /api/agents/schedules/:agentId/repin — recompute expected schema fingerprint
 app.post('/api/agents/schedules/:agentId/repin', requireLocal, (req: Request, res: Response) => {
   const { agentId } = req.params;
-  ensureSplanDir();
-  const schedules = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
-  const existing = schedules[agentId];
+  const existing = loadSchedule(agentId);
   if (!existing) return void res.status(404).json({ error: 'schedule_not_found' });
   const pinnedAt = new Date().toISOString();
   const expectedSchemaFingerprint = computeSchemaFingerprint();
-  schedules[agentId] = { ...existing, expectedSchemaFingerprint, pinnedAt };
-  fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+  upsertSchedule({ ...existing, expectedSchemaFingerprint, pinnedAt });
   return void res.json({ repinned: true, expectedSchemaFingerprint, pinnedAt });
 });
 
@@ -2101,10 +2222,7 @@ app.delete('/api/agents/schedules/:agentId', (req: Request, res: Response) => {
   const { triggerId } = req.body as { triggerId?: string };
 
   const doRemove = () => {
-    ensureSplanDir();
-    const schedules = readJson<Record<string, unknown>>(AGENT_SCHEDULES_FILE, {});
-    delete schedules[agentId];
-    fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+    deleteScheduleRow(agentId);
     return void res.json({ removed: true });
   };
 
@@ -2177,20 +2295,17 @@ app.post('/api/agents/schedules/:agentId/rebuild', requireLocal, async (req: Req
 
   exec(scheduleCmd, { shell: 'cmd.exe', cwd: PROJECT_DIR }, (err, stdout) => {
     const nowIso = new Date().toISOString();
-    ensureSplanDir();
-    const schedules = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
 
     if (err) {
       const newTriggerId = `unregistered-${agentId}-${Date.now().toString(36)}`;
-      schedules[agentId] = {
-        ...schedule,
+      upsertSchedule({
+        ...(schedule as ScheduleRecord),
         triggerId: newTriggerId,
         unregistered: true,
         cliError: err.message,
         promptSnapshot: built.prompt,
         promptSnapshotAt: nowIso,
-      };
-      fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+      });
       return void res.json({
         rebuilt: true,
         triggerId: newTriggerId,
@@ -2205,15 +2320,15 @@ app.post('/api/agents/schedules/:agentId/rebuild', requireLocal, async (req: Req
     if (idMatch) newTriggerId = idMatch[1];
     else newTriggerId = `splan-${agentId}-${Date.now().toString(36)}`;
 
-    schedules[agentId] = {
-      ...schedule,
+    upsertSchedule({
+      ...(schedule as ScheduleRecord),
       triggerId: newTriggerId,
       unregistered: false,
+      cliError: null,
       promptSnapshot: built.prompt,
       promptSnapshotAt: nowIso,
       cliOutput: stdout.trim(),
-    };
-    fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+    });
     return void res.json({ rebuilt: true, triggerId: newTriggerId, promptSnapshotAt: nowIso });
   });
 });
@@ -2245,11 +2360,6 @@ function rateLimitScheduled(agentId: string, endpoint: 'inputs' | 'results'): bo
   if (now - last < SCHEDULED_RATE_WINDOW_MS) return false;
   scheduledRateState.set(key, now);
   return true;
-}
-
-function loadSchedule(agentId: string): Record<string, unknown> | null {
-  const schedules = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
-  return schedules[agentId] ?? null;
 }
 
 type RunLogCore = {
@@ -3538,4 +3648,5 @@ const PORT = parseInt(process.env.PORT || '3100', 10);
 app.listen(PORT, () => {
   console.log(`Schema Planner API running on port ${PORT}`);
   getDb();
+  importSchedulesFromFileIfEmpty();
 });

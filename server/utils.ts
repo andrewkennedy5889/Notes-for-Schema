@@ -58,6 +58,7 @@ export const JSON_COLUMNS = new Set([
   'systems',
   'result_json',
   'tool_calls_json',
+  'param_defaults',
 ]);
 
 // ─── Boolean integer columns ──────────────────────────────────────────────────
@@ -74,6 +75,8 @@ export const BOOL_COLUMNS = new Set([
   'is_stale',
   'is_user_edited',
   'auto_added',
+  'enabled',
+  'unregistered',
 ]);
 
 // ─── Parse a row coming OUT of SQLite ────────────────────────────────────────

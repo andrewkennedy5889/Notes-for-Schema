@@ -454,6 +454,24 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_entity_deps_by_ref
       ON _splan_entity_dependencies(ref_type, ref_id);
 
+    CREATE TABLE IF NOT EXISTS _splan_agent_schedules (
+      agent_id                    TEXT PRIMARY KEY,
+      cron_expression             TEXT NOT NULL,
+      cron_label                  TEXT NOT NULL DEFAULT '',
+      prompt_override             TEXT,
+      param_defaults              TEXT NOT NULL DEFAULT '{}',
+      trigger_id                  TEXT NOT NULL,
+      enabled                     INTEGER NOT NULL DEFAULT 1,
+      created_at                  TEXT NOT NULL,
+      cli_output                  TEXT NOT NULL DEFAULT '',
+      cli_error                   TEXT,
+      unregistered                INTEGER NOT NULL DEFAULT 0,
+      expected_schema_fingerprint TEXT,
+      pinned_at                   TEXT,
+      prompt_snapshot             TEXT NOT NULL DEFAULT '',
+      prompt_snapshot_at          TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS _splan_scheduled_runs (
       id                     INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id                 TEXT NOT NULL UNIQUE,
