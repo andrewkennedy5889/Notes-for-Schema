@@ -2020,7 +2020,11 @@ app.post('/api/agents/schedules', async (req: Request, res: Response) => {
     } catch { /* old trigger may already be gone */ }
   }
 
-  // Create the schedule via claude CLI
+  // Attempt to create the Anthropic trigger via the claude CLI. The current
+  // claude CLI (2026) exposes scheduling through the in-session /schedule
+  // skill (CronCreate tool) rather than a shell subcommand. If the shell call
+  // fails, persist the schedule record anyway with unregistered: true so the
+  // user can hand off the baked prompt to /schedule in a Claude Code session.
   const safePrompt = prompt
     .replace(/%/g, '%%')
     .replace(/\r?\n/g, ' ')
@@ -2028,23 +2032,7 @@ app.post('/api/agents/schedules', async (req: Request, res: Response) => {
 
   const scheduleCmd = `claude schedule create --name "${(agentName || agentId).replace(/"/g, '')}" --cron "${config.cronExpression}" --prompt "${safePrompt}"`;
 
-  exec(scheduleCmd, { shell: 'cmd.exe', cwd: PROJECT_DIR }, (err, stdout, stderr) => {
-    if (err) {
-      console.error('Schedule create failed:', err.message, stderr);
-      return void res.status(500).json({ error: `Schedule creation failed: ${err.message}` });
-    }
-
-    // Parse trigger ID from output (claude schedule create outputs the trigger info)
-    let triggerId = '';
-    const idMatch = stdout.match(/(?:trigger[_\s-]?id|id)[:\s]+([a-zA-Z0-9_-]+)/i);
-    if (idMatch) {
-      triggerId = idMatch[1];
-    } else {
-      // Fallback: use the full stdout trimmed as a reference
-      triggerId = `splan-${agentId}-${Date.now().toString(36)}`;
-    }
-
-    // Persist the schedule config
+  const persistSchedule = (triggerId: string, opts: { unregistered: boolean; cliOutput?: string; cliError?: string }) => {
     ensureSplanDir();
     const schedules = readJson<Record<string, unknown>>(AGENT_SCHEDULES_FILE, {});
     const nowIso = new Date().toISOString();
@@ -2056,14 +2044,39 @@ app.post('/api/agents/schedules', async (req: Request, res: Response) => {
       triggerId,
       enabled: true,
       createdAt: nowIso,
-      cliOutput: stdout.trim(),
+      cliOutput: opts.cliOutput ?? '',
+      cliError: opts.cliError,
+      unregistered: opts.unregistered,
       expectedSchemaFingerprint: computeSchemaFingerprint(),
       pinnedAt: nowIso,
       promptSnapshot: prompt,
       promptSnapshotAt: nowIso,
     };
     fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+  };
 
+  exec(scheduleCmd, { shell: 'cmd.exe', cwd: PROJECT_DIR }, (err, stdout, stderr) => {
+    if (err) {
+      console.warn('[schedules] claude CLI path unavailable — storing unregistered. Stderr:', stderr?.trim());
+      const triggerId = `unregistered-${agentId}-${Date.now().toString(36)}`;
+      persistSchedule(triggerId, { unregistered: true, cliError: err.message });
+      return void res.json({
+        saved: true,
+        triggerId,
+        unregistered: true,
+        reason: 'claude_cli_unavailable',
+        detail: 'Create the trigger via /schedule skill in Claude Code using the snapshotted prompt. See Inspect prompt in the UI.',
+      });
+    }
+
+    let triggerId = '';
+    const idMatch = stdout.match(/(?:trigger[_\s-]?id|id)[:\s]+([a-zA-Z0-9_-]+)/i);
+    if (idMatch) {
+      triggerId = idMatch[1];
+    } else {
+      triggerId = `splan-${agentId}-${Date.now().toString(36)}`;
+    }
+    persistSchedule(triggerId, { unregistered: false, cliOutput: stdout.trim() });
     return void res.json({ saved: true, triggerId });
   });
 });
@@ -2163,19 +2176,39 @@ app.post('/api/agents/schedules/:agentId/rebuild', requireLocal, async (req: Req
   const scheduleCmd = `claude schedule create --name "${String(agentId).replace(/"/g, '')}" --cron "${schedule.cronExpression}" --prompt "${safePrompt}"`;
 
   exec(scheduleCmd, { shell: 'cmd.exe', cwd: PROJECT_DIR }, (err, stdout) => {
-    if (err) return void res.status(500).json({ error: `rebuild_failed: ${err.message}` });
+    const nowIso = new Date().toISOString();
+    ensureSplanDir();
+    const schedules = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
+
+    if (err) {
+      const newTriggerId = `unregistered-${agentId}-${Date.now().toString(36)}`;
+      schedules[agentId] = {
+        ...schedule,
+        triggerId: newTriggerId,
+        unregistered: true,
+        cliError: err.message,
+        promptSnapshot: built.prompt,
+        promptSnapshotAt: nowIso,
+      };
+      fs.writeFileSync(AGENT_SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+      return void res.json({
+        rebuilt: true,
+        triggerId: newTriggerId,
+        unregistered: true,
+        reason: 'claude_cli_unavailable',
+        promptSnapshotAt: nowIso,
+      });
+    }
 
     let newTriggerId = '';
     const idMatch = stdout.match(/(?:trigger[_\s-]?id|id)[:\s]+([a-zA-Z0-9_-]+)/i);
     if (idMatch) newTriggerId = idMatch[1];
     else newTriggerId = `splan-${agentId}-${Date.now().toString(36)}`;
 
-    ensureSplanDir();
-    const schedules = readJson<Record<string, Record<string, unknown>>>(AGENT_SCHEDULES_FILE, {});
-    const nowIso = new Date().toISOString();
     schedules[agentId] = {
       ...schedule,
       triggerId: newTriggerId,
+      unregistered: false,
       promptSnapshot: built.prompt,
       promptSnapshotAt: nowIso,
       cliOutput: stdout.trim(),

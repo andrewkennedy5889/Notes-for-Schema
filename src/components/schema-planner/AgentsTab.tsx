@@ -39,6 +39,7 @@ interface ScheduleConfig {
   paramDefaults?: Record<string, string>;
   triggerId?: string;
   enabled: boolean;
+  unregistered?: boolean;
 }
 
 interface HistoryEntry {
@@ -684,12 +685,22 @@ function AgentCard({
       <div className="flex items-center gap-3 mb-2">
         <span className="text-xl leading-none">{agent.icon}</span>
         <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>{agent.name}</h3>
-        {schedule?.enabled && (
+        {schedule?.enabled && !schedule.unregistered && (
           <span className="text-[9px] px-1.5 py-0.5 rounded font-medium" style={{ backgroundColor: "rgba(78,203,113,0.12)", color: "#4ecb71" }}>
             Scheduled: {schedule.cronLabel}
           </span>
         )}
+        {schedule?.enabled && schedule.unregistered && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded font-medium" style={{ backgroundColor: "rgba(242,182,97,0.15)", color: "#f2b661" }}>
+            Unregistered: {schedule.cronLabel} — finish via /schedule
+          </span>
+        )}
       </div>
+      {schedule?.enabled && schedule.unregistered && (
+        <div className="text-[11px] rounded px-3 py-2 mb-3" style={{ backgroundColor: "rgba(242,182,97,0.08)", color: "#f2b661", border: "1px solid rgba(242,182,97,0.2)" }}>
+          Prompt saved locally but the Anthropic trigger isn&rsquo;t registered yet. Click <strong>Inspect prompt</strong> below, copy the snapshot, then in a Claude Code session run <code className="font-mono">/schedule</code> and paste it with the cadence (<code className="font-mono">{schedule.cronExpression}</code>).
+        </div>
+      )}
       <p className="text-xs leading-relaxed mb-4" style={{ color: "var(--color-text-muted)" }}>{agent.description}</p>
       <div className="flex flex-col gap-2">
         {agent.prompts.map((p, i) => (
@@ -1532,9 +1543,18 @@ function PromptInspectorModal({
         )}
         <div className="flex-1 overflow-auto p-4 space-y-4">
           <div>
-            <label className="text-[10px] font-semibold uppercase tracking-wider block mb-1" style={{ color: "var(--color-text-subtle)" }}>
-              Snapshot (what Claude receives)
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: "var(--color-text-subtle)" }}>
+                Snapshot (what Claude receives)
+              </label>
+              <button
+                onClick={() => { void navigator.clipboard.writeText(data.promptSnapshot); }}
+                className="text-[10px] px-2 py-0.5 rounded"
+                style={{ backgroundColor: "rgba(66,139,202,0.12)", color: "#428bca" }}
+              >
+                Copy
+              </button>
+            </div>
             <textarea
               value={data.promptSnapshot}
               readOnly
