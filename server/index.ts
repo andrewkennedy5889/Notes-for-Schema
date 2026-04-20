@@ -3644,7 +3644,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT || '3100', 10);
+const PORT = parseInt(process.env.PORT || '3800', 10);
 app.listen(PORT, () => {
   console.log(`Schema Planner API running on port ${PORT}`);
   getDb();

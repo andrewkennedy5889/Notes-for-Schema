@@ -34,17 +34,18 @@ export default defineConfig({
     chunkSizeWarningLimit: 700,
   },
   server: {
+    port: 5175,
     proxy: {
       '/api': {
-        target: 'http://localhost:3100',
+        target: 'http://localhost:3800',
         changeOrigin: true,
       },
       '/images': {
-        target: 'http://localhost:3100',
+        target: 'http://localhost:3800',
         changeOrigin: true,
       },
       '/prototypes': {
-        target: 'http://localhost:3100',
+        target: 'http://localhost:3800',
         changeOrigin: true,
       },
     },
