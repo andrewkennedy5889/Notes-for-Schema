@@ -631,6 +631,14 @@ export async function deployCode(message?: string): Promise<{ success: boolean; 
   return res.json();
 }
 
+export async function pullCode(): Promise<{ success: boolean; status: string; message?: string; filesChanged?: number; error?: string }> {
+  const res = await fetch(`${BASE}/sync/pull-code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return res.json();
+}
+
 // ─── App mode (local vs hosted) ──────────────────────────────────────────────
 
 export type AppMode = 'local' | 'hosted';

@@ -3428,6 +3428,70 @@ app.post('/api/sync/deploy-code', requireLocal, (req: Request, res: Response) =>
   });
 });
 
+// Pull code: git fetch + pull (local-only — shells out to git, inverse of deploy-code)
+app.post('/api/sync/pull-code', requireLocal, (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') return void res.status(404).json({ error: 'Not available' });
+
+  const PROJECT_ROOT = path.join(__dirname, '..');
+  const execOpts = { cwd: PROJECT_ROOT } as const;
+
+  // Read GitHub PAT for authenticated fetch (credential manager doesn't work in child_process)
+  const ghConfigPath = path.join(PROJECT_ROOT, '.github-config.json');
+  let fetchCmd = 'git fetch origin';
+  let pullCmd = 'git pull origin main';
+  try {
+    const ghConfig = JSON.parse(fs.readFileSync(ghConfigPath, 'utf-8'));
+    if (ghConfig.pat) {
+      const remoteUrl = execSync('git remote get-url origin', { cwd: PROJECT_ROOT }).toString().trim();
+      const match = remoteUrl.match(/github\.com[/:](.+?)(?:\.git)?$/);
+      if (match) {
+        const authUrl = `https://${ghConfig.pat}@github.com/${match[1]}.git`;
+        fetchCmd = `git fetch ${authUrl}`;
+        pullCmd = `git pull ${authUrl} main`;
+      }
+    }
+  } catch { /* no PAT, try default */ }
+
+  // Refuse to pull onto a dirty tree — user must deploy or discard first
+  exec('git status --porcelain', execOpts, (statusErr, statusOut) => {
+    if (statusErr) return void res.status(500).json({ error: `git status failed: ${statusErr.message}` });
+
+    if (statusOut.trim()) {
+      return void res.status(409).json({
+        success: false,
+        status: 'dirty',
+        error: 'Uncommitted changes detected — Deploy Code or discard local changes before pulling.',
+        filesChanged: statusOut.trim().split('\n').length,
+      });
+    }
+
+    exec(fetchCmd, execOpts, (fetchErr) => {
+      if (fetchErr) return void res.status(500).json({ error: `git fetch failed: ${fetchErr.message}` });
+
+      exec(pullCmd, execOpts, (pullErr, pullOut) => {
+        if (pullErr) return void res.status(500).json({ error: `git pull failed: ${pullErr.message}` });
+
+        if (/Already up to date/i.test(pullOut)) {
+          return void res.json({ success: true, status: 'nothing', message: 'Already up to date', filesChanged: 0 });
+        }
+
+        // Parse "N files changed" from pull's shortstat-style summary when present.
+        const fileCountMatch = pullOut.match(/(\d+)\s+files?\s+changed/);
+        const filesChanged = fileCountMatch
+          ? parseInt(fileCountMatch[1], 10)
+          : pullOut.split('\n').filter((l) => /^\s*\S+\s+\|\s+\d+/.test(l)).length;
+
+        return void res.json({
+          success: true,
+          status: 'pulled',
+          message: `Pulled latest from origin/main (${filesChanged} file${filesChanged === 1 ? '' : 's'} changed)`,
+          filesChanged,
+        });
+      });
+    });
+  });
+});
+
 // ─── GET /api/version — current git commit hash ────────────────────────────
 // Prefer platform-provided build-time env vars (Railway, Vercel, Render) since
 // hosted containers typically have no .git directory. Fall back to git CLI for

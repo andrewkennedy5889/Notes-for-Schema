@@ -3416,9 +3416,11 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
         // Unsaved rows carry a negative tempId (see applyLocalCreate). Writing notes against a
         // tempId would orphan _splan_entity_notes rows, so block the click until the row is saved.
         const isUnsaved = !eid || eid <= 0;
-        // Prefer cache (shared store), fall back to row value (legacy concepts.notes during transition)
+        // Prefer cache (shared store), fall back to row value (legacy concepts.notes during transition).
+        // Check entry existence (not just content) so a cache entry with content=null or "" is
+        // respected rather than falling through to stale legacy data.
         const cached = entityNotesCache[noteCacheKey(entityType, eid, col.key)];
-        const displayValue = cached?.content ?? value;
+        const displayValue = cached !== undefined ? (cached.content ?? '') : value;
         return (
           <span
             className={isUnsaved ? "px-0.5 -mx-0.5 block min-h-[1.2em]" : "cursor-pointer hover:bg-black/5 rounded px-0.5 -mx-0.5 block min-h-[1.2em]"}
@@ -5358,7 +5360,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                       const fidUnified = row.featureId as number;
                       const unifiedCacheKey = noteCacheKey('feature', fidUnified, 'notes');
                       const unifiedCached = entityNotesCache[unifiedCacheKey];
-                      const unifiedInitial = unifiedCached?.content ?? '';
+                      const unifiedInitial = unifiedCached !== undefined ? (unifiedCached.content ?? '') : String(row.notes ?? '');
                       const unifiedInitialFmt = (Array.isArray(unifiedCached?.notesFmt) ? unifiedCached?.notesFmt : []) as FmtRange[];
                       const unifiedInitialCollapsed = unifiedCached?.collapsedSections as Record<string, { body: string; bodyFmt: FmtRange[] }> | undefined;
                       const unifiedInitialTables = unifiedCached?.embeddedTables as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined;
@@ -5393,7 +5395,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                               <FeatureMentionField
                                 initial={unifiedInitial}
                                 initialFmt={unifiedInitialFmt}
-                                onCommit={(text, fmt, collapsed, tables) => unifiedPersist(text || null, fmt, collapsed, tables)}
+                                onCommit={(text, fmt, collapsed, tables) => unifiedPersist(text, fmt, collapsed ?? unifiedInitialCollapsed, tables ?? unifiedInitialTables)}
                                 tables={mentionTables}
                                 fields={mentionFields}
                                 tableNames={mentionTableNames}
@@ -5409,9 +5411,9 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                 onPickTableForField={openTablePickerForField}
                                 placeholder="Notes — type ( to reference a table, field, module, feature, concept, or image. Use ## headers for per-platform or per-step sections."
                                 initialCollapsed={unifiedInitialCollapsed}
-                                onCollapsedChange={(collapsed) => unifiedPersist(unifiedInitial || null, unifiedInitialFmt, collapsed, unifiedInitialTables)}
+                                onCollapsedChange={(collapsed) => unifiedPersist(unifiedInitial, unifiedInitialFmt, collapsed, unifiedInitialTables)}
                                 initialTables={unifiedInitialTables}
-                                onTablesChange={(tbls) => unifiedPersist(unifiedInitial || null, unifiedInitialFmt, unifiedInitialCollapsed, tbls)}
+                                onTablesChange={(tbls) => unifiedPersist(unifiedInitial, unifiedInitialFmt, unifiedInitialCollapsed, tbls)}
                                 noteContext={{ module: section.name || undefined, moduleColor: moduleColColor, feature: String(row.featureName || ""), featureColor: featureColColor, field: "Notes", fieldColor: "#5bc0de" }}
                               />
                             </FullscreenNoteWrapper>
@@ -5762,7 +5764,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                           const fidNestedUnified = feat.featureId as number;
                                           const nestedCacheKey = noteCacheKey('feature', fidNestedUnified, 'notes');
                                           const nestedCached = entityNotesCache[nestedCacheKey];
-                                          const nestedInitial = nestedCached?.content ?? '';
+                                          const nestedInitial = nestedCached !== undefined ? (nestedCached.content ?? '') : String(feat.notes ?? '');
                                           const nestedInitialFmt = (Array.isArray(nestedCached?.notesFmt) ? nestedCached?.notesFmt : []) as FmtRange[];
                                           const nestedInitialCollapsed = nestedCached?.collapsedSections as Record<string, { body: string; bodyFmt: FmtRange[] }> | undefined;
                                           const nestedInitialTables = nestedCached?.embeddedTables as Record<string, import("./schema-planner/types").EmbeddedTable> | undefined;
@@ -5796,7 +5798,7 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                                   <FeatureMentionField
                                                     initial={nestedInitial}
                                                     initialFmt={nestedInitialFmt}
-                                                    onCommit={(text, fmt, collapsed, tables) => nestedPersist(text || null, fmt, collapsed, tables)}
+                                                    onCommit={(text, fmt, collapsed, tables) => nestedPersist(text, fmt, collapsed ?? nestedInitialCollapsed, tables ?? nestedInitialTables)}
                                                     tables={mentionTables}
                                                     fields={mentionFields}
                                                     tableNames={mentionTableNames}
@@ -5812,9 +5814,9 @@ function SchemaPlannerTabInner({ onPickerModeChange, onDataChanged, subTabProp, 
                                                     onPickTableForField={openTablePickerForField}
                                                     placeholder="Notes — type ( to reference a table, field, module, feature, concept, or image. Use ## headers for per-platform or per-step sections."
                                                     initialCollapsed={nestedInitialCollapsed}
-                                                    onCollapsedChange={(collapsed) => nestedPersist(nestedInitial || null, nestedInitialFmt, collapsed, nestedInitialTables)}
+                                                    onCollapsedChange={(collapsed) => nestedPersist(nestedInitial, nestedInitialFmt, collapsed, nestedInitialTables)}
                                                     initialTables={nestedInitialTables}
-                                                    onTablesChange={(tbls) => nestedPersist(nestedInitial || null, nestedInitialFmt, nestedInitialCollapsed, tbls)}
+                                                    onTablesChange={(tbls) => nestedPersist(nestedInitial, nestedInitialFmt, nestedInitialCollapsed, tbls)}
                                                     noteContext={{ module: (feat.modules as number[])?.map((mid: number) => { const m = (data.modules || []).find((mm) => mm.moduleId === mid); return m ? String(m.moduleName) : ""; }).filter(Boolean).join(", ") || undefined, moduleColor: moduleColColor, feature: String(feat.featureName || ""), featureColor: featureColColor, field: "Notes", fieldColor: "#5bc0de" }}
                                                   />
                                                 </FullscreenNoteWrapper>
@@ -7272,7 +7274,7 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
         // Initial values: prefer cache, fall back to legacy row fields (Concepts pre-migration).
         // Each _splan_entity_notes row stores the per-section collapsed/tables maps directly
         // (not nested by noteKey) — the row IS the single note.
-        const initialContent = cached?.content ?? (noteKey === "notes" ? String(row.notes ?? "") : "");
+        const initialContent = cached !== undefined ? (cached.content ?? '') : (noteKey === "notes" ? String(row.notes ?? "") : "");
         const initialFmt = (cached?.notesFmt ?? (noteKey === "notes" && Array.isArray(row.notesFmt) ? row.notesFmt : [])) as FmtRange[];
         const cachedCollapsed = cached?.collapsedSections as Record<string, { body: string; bodyFmt: FmtRange[] }> | undefined;
         const legacyCollapsed = ((row.collapsedSections as Record<string, Record<string, { body: string; bodyFmt: FmtRange[] }>> | null) ?? {})[noteKey];
@@ -7342,7 +7344,7 @@ ${depLabel} "${codeChangeEntity.name}" needs implementation or changes.
                 initialFmt={initialFmt}
                 onCommit={(text, fmt, collapsed, tables) => {
                   void persist(
-                    text || null,
+                    text,
                     fmt,
                     collapsed ?? (cached?.collapsedSections as Record<string, unknown> | undefined),
                     tables ?? (cached?.embeddedTables as Record<string, unknown> | undefined)

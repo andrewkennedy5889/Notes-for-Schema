@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, Suspense, lazy } from 
 import { useSearchParams } from "react-router-dom";
 import SchemaPlannerTab from "../components/schema-planner/SchemaPlannerTab";
 import { TABLE_CONFIGS, SUB_TABS } from "../components/schema-planner/constants";
-import { fetchSyncStatus, syncPush, syncPull, deployCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, fetchLastDeploy, fetchLocalGitStatus, fetchClaudeMdStats, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt, type LastDeploy, type LocalGitStatus, type ClaudeMdStats } from "../lib/api";
+import { fetchSyncStatus, syncPush, syncPull, deployCode, pullCode, fetchAppConfig, fetchVersion, fetchSyncDiff, fetchLastSyncAttempt, fetchLastDeploy, fetchLocalGitStatus, fetchClaudeMdStats, type SyncStatus, type AppMode, type SyncDiff, type LastSyncAttempt, type LastDeploy, type LocalGitStatus, type ClaudeMdStats } from "../lib/api";
 import AutoSyncToast from "../components/schema-planner/AutoSyncToast";
 
 // Conditionally-rendered panels — lazy-loaded to trim the initial bundle
@@ -203,7 +203,7 @@ export default function SchemaPlanner() {
 
   // Sync state
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
-  const [syncLoading, setSyncLoading] = useState<'push' | 'pull' | 'deploy' | 'diff' | null>(null);
+  const [syncLoading, setSyncLoading] = useState<'push' | 'pull' | 'deploy' | 'pullCode' | 'diff' | null>(null);
   const [syncResult, setSyncResult] = useState<string | null>(null);
   const [deployProgress, setDeployProgress] = useState<{ status: string; elapsed: number; targetCommit: string } | null>(null);
   const [syncDiff, setSyncDiff] = useState<SyncDiff | null>(null);
@@ -345,7 +345,7 @@ export default function SchemaPlanner() {
           setSyncResult(`ℹ️ Additional changes accumulated during sync — running follow-up push...`);
           setTimeout(() => { void handleSyncPush({ source: 'auto-push', followUpCount: followUpCount + 1 }); }, 0);
         } else if (isAuto && localAfter > 0 && followUpCount >= 2) {
-          setSyncResult(`ℹ️ ${localAfter} local change(s) still pending after follow-ups. Click Push Data to send them.`);
+          setSyncResult(`ℹ️ ${localAfter} local change(s) still pending after follow-ups. Click Push Records to send them.`);
         }
       }
     } catch (e) {
@@ -475,11 +475,11 @@ export default function SchemaPlanner() {
               setSyncResult(`✅ Deploy complete: commit ${targetCommit} (${elapsed}s) + pushed ${pushResult.totalRows} rows`);
               setDeployTitle('success');
             } else {
-              setSyncResult(`❌ Deploy succeeded but data push FAILED: ${pushResult.error}. Click Push Data now to retry.`);
+              setSyncResult(`❌ Deploy succeeded but data push FAILED: ${pushResult.error}. Click Push Records now to retry.`);
               setDeployTitle('fail');
             }
           } catch (e) {
-            setSyncResult(`❌ Deploy succeeded but data push FAILED: ${(e as Error).message}. Click Push Data now to retry.`);
+            setSyncResult(`❌ Deploy succeeded but data push FAILED: ${(e as Error).message}. Click Push Records now to retry.`);
             setDeployTitle('fail');
           }
           setDeployProgress(null);
@@ -513,11 +513,11 @@ export default function SchemaPlanner() {
             setSyncResult(`❌ Deploy timed out AND data push blocked: schema mismatch. Check Railway dashboard manually.`);
             setDeployTitle('fail');
           } else {
-            setSyncResult(`❌ Deploy timed out AND data push FAILED: ${pushResult.error}. Click Push Data to retry.`);
+            setSyncResult(`❌ Deploy timed out AND data push FAILED: ${pushResult.error}. Click Push Records to retry.`);
             setDeployTitle('fail');
           }
         } catch (e) {
-          setSyncResult(`❌ Deploy timed out AND data push FAILED: ${(e as Error).message}. Click Push Data to retry.`);
+          setSyncResult(`❌ Deploy timed out AND data push FAILED: ${(e as Error).message}. Click Push Records to retry.`);
           setDeployTitle('fail');
         }
         clearPendingDeploy();
@@ -576,6 +576,25 @@ export default function SchemaPlanner() {
       setSyncLoading(null);
     }
   }, [syncStatus?.remoteUrl, startDeployPolling]);
+
+  const handlePullCode = useCallback(async () => {
+    setSyncLoading('pullCode');
+    setSyncResult(null);
+    try {
+      const result = await pullCode();
+      if (!result.success) {
+        setSyncResult(`❌ Pull Code failed: ${result.error || 'unknown error'}`);
+      } else if (result.status === 'nothing') {
+        setSyncResult(`✅ ${result.message || 'Already up to date'}`);
+      } else {
+        setSyncResult(`✅ ${result.message || 'Pulled latest from origin/main'}`);
+      }
+    } catch (e) {
+      setSyncResult(`❌ Pull Code failed: ${(e as Error).message}`);
+    } finally {
+      setSyncLoading(null);
+    }
+  }, []);
 
   // F8: resume in-flight deploy on mount
   const didResumeDeployRef = useRef<boolean>(false);
@@ -1665,49 +1684,84 @@ export default function SchemaPlanner() {
 
                     return (
                       <>
-                        <div className="flex items-center gap-3 mb-2 flex-wrap">
-                          <button
-                            onClick={() => handleSyncPush()}
-                            disabled={!!syncLoading || pushBlocked}
-                            className="px-4 py-2 text-xs rounded font-medium transition-colors"
-                            style={{
-                              backgroundColor: syncLoading === 'push' ? "rgba(78,203,113,0.05)" : "rgba(78,203,113,0.15)",
-                              color: "#4ecb71",
-                              opacity: (syncLoading && syncLoading !== 'push') || pushBlocked ? 0.35 : 1,
-                              cursor: pushBlocked ? "not-allowed" : undefined,
-                            }}
-                            title={schemaMismatch ? "Blocked by schema mismatch — Deploy Code first" : pushBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Remote has unsynced changes. Pull first.") : "Push local data to remote"}
-                          >
-                            {syncLoading === 'push' ? "Pushing..." : "Push Data"}
-                          </button>
-                          <button
-                            onClick={() => handleSyncPull()}
-                            disabled={!!syncLoading || pullBlocked}
-                            className="px-4 py-2 text-xs rounded font-medium transition-colors"
-                            style={{
-                              backgroundColor: syncLoading === 'pull' ? "rgba(66,139,202,0.05)" : "rgba(66,139,202,0.15)",
-                              color: "#428bca",
-                              opacity: (syncLoading && syncLoading !== 'pull') || pullBlocked ? 0.35 : 1,
-                              cursor: pullBlocked ? "not-allowed" : undefined,
-                            }}
-                            title={schemaMismatch ? "Blocked by schema mismatch — Deploy Code first" : pullBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Local has unsynced changes. Push first.") : "Pull remote data to local"}
-                          >
-                            {syncLoading === 'pull' ? "Pulling..." : "Pull Data"}
-                          </button>
-                          {!isHosted && (
+                        <div className="mb-2">
+                          {/* Column headers */}
+                          <div className="grid gap-2 mb-1.5" style={{ gridTemplateColumns: "60px 1fr 1fr" }}>
+                            <div />
+                            <div className="text-[10px] font-semibold tracking-wide text-center uppercase" style={{ color: "#f59e0b" }}>
+                              To GitHub ↑
+                            </div>
+                            <div className="text-[10px] font-semibold tracking-wide text-center uppercase" style={{ color: "#06b6d4" }}>
+                              From GitHub ↓
+                            </div>
+                          </div>
+                          {/* Records row */}
+                          <div className="grid gap-2 mb-1.5" style={{ gridTemplateColumns: "60px 1fr 1fr" }}>
+                            <div className="text-[10px] font-medium flex items-center" style={{ color: "var(--color-text-muted)" }}>
+                              Records
+                            </div>
                             <button
-                              onClick={handleDeployCode}
-                              disabled={!!syncLoading}
-                              className="px-4 py-2 text-xs rounded font-medium transition-colors"
+                              onClick={() => handleSyncPush()}
+                              disabled={!!syncLoading || pushBlocked}
+                              className="px-4 py-2 text-xs rounded font-medium transition-colors text-center"
                               style={{
-                                backgroundColor: syncLoading === 'deploy' ? "rgba(168,85,247,0.05)" : "rgba(168,85,247,0.15)",
-                                color: "#a855f7",
-                                opacity: syncLoading && syncLoading !== 'deploy' ? 0.4 : 1,
+                                backgroundColor: syncLoading === 'push' ? "rgba(245,158,11,0.05)" : "rgba(245,158,11,0.12)",
+                                color: "#f59e0b",
+                                opacity: (syncLoading && syncLoading !== 'push') || pushBlocked ? 0.35 : 1,
+                                cursor: pushBlocked ? "not-allowed" : undefined,
                               }}
-                              title="Shells out to git on this server — only available on the local instance"
+                              title={schemaMismatch ? "Blocked by schema mismatch — Deploy Code first" : pushBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Remote has unsynced changes. Pull first.") : "Push local records to remote"}
                             >
-                              {syncLoading === 'deploy' ? "Deploying..." : "Deploy Code"}
+                              {syncLoading === 'push' ? "Pushing..." : "Push Records"}
                             </button>
+                            <button
+                              onClick={() => handleSyncPull()}
+                              disabled={!!syncLoading || pullBlocked}
+                              className="px-4 py-2 text-xs rounded font-medium transition-colors text-center"
+                              style={{
+                                backgroundColor: syncLoading === 'pull' ? "rgba(6,182,212,0.05)" : "rgba(6,182,212,0.12)",
+                                color: "#06b6d4",
+                                opacity: (syncLoading && syncLoading !== 'pull') || pullBlocked ? 0.35 : 1,
+                                cursor: pullBlocked ? "not-allowed" : undefined,
+                              }}
+                              title={schemaMismatch ? "Blocked by schema mismatch — Deploy Code first" : pullBlocked ? (conflict ? "Blocked: both sides have changes. Resolve manually or force." : "Local has unsynced changes. Push first.") : "Pull remote records to local"}
+                            >
+                              {syncLoading === 'pull' ? "Pulling..." : "Pull Records"}
+                            </button>
+                          </div>
+                          {/* Code row */}
+                          {!isHosted && (
+                            <div className="grid gap-2" style={{ gridTemplateColumns: "60px 1fr 1fr" }}>
+                              <div className="text-[10px] font-medium flex items-center" style={{ color: "var(--color-text-muted)" }}>
+                                Code
+                              </div>
+                              <button
+                                onClick={handleDeployCode}
+                                disabled={!!syncLoading}
+                                className="px-4 py-2 text-xs rounded font-medium transition-colors text-center"
+                                style={{
+                                  backgroundColor: syncLoading === 'deploy' ? "rgba(245,158,11,0.05)" : "rgba(245,158,11,0.12)",
+                                  color: "#f59e0b",
+                                  opacity: syncLoading && syncLoading !== 'deploy' ? 0.4 : 1,
+                                }}
+                                title="Commit and push code to GitHub — only available on the local instance"
+                              >
+                                {syncLoading === 'deploy' ? "Deploying..." : "Deploy Code"}
+                              </button>
+                              <button
+                                onClick={handlePullCode}
+                                disabled={!!syncLoading}
+                                className="px-4 py-2 text-xs rounded font-medium transition-colors text-center"
+                                style={{
+                                  backgroundColor: syncLoading === 'pullCode' ? "rgba(6,182,212,0.05)" : "rgba(6,182,212,0.12)",
+                                  color: "#06b6d4",
+                                  opacity: syncLoading && syncLoading !== 'pullCode' ? 0.4 : 1,
+                                }}
+                                title="Fetch and pull the latest code from origin/main — only available on the local instance"
+                              >
+                                {syncLoading === 'pullCode' ? "Pulling..." : "Pull Code"}
+                              </button>
+                            </div>
                           )}
                         </div>
 
